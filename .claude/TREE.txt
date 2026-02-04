@@ -1,0 +1,28 @@
+/home/lynnkse/cognitive-hq
+├── AGENT_RECREATION_GUIDE.md
+├── CLAUDE.md
+└── .claude
+    ├── ABSTRACTIONS.md
+    ├── BOOTSTRAP.md
+    ├── DERIVED_CONTEXT.DATA.md
+    ├── DERIVED_CONTEXT.md
+    ├── INTENT
+    │   ├── CLAWDBOT_EVALUATION.md
+    │   ├── GATEWAY_DESIGN_V0.md
+    │   ├── MASTER_ROADMAP.md
+    │   ├── README.md
+    │   └── REFERENCES
+    ├── LOG.md
+    ├── log.sh
+    ├── ONBOARDING.md
+    ├── RULES.md
+    ├── settings.local.json
+    ├── STATE.md
+    ├── TODO.md
+    ├── tree.sh
+    ├── TREE.txt
+    └── WORKFLOW.md
+
+3 directories, 20 files
+
+# Last updated: 2026-02-04
