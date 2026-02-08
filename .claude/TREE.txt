@@ -1,28 +1,78 @@
 /home/lynnkse/cognitive-hq
 ├── AGENT_RECREATION_GUIDE.md
+├── .claude
+│   ├── ABSTRACTIONS.md
+│   ├── BOOTSTRAP.md
+│   ├── DERIVED_CONTEXT.DATA.md
+│   ├── DERIVED_CONTEXT.md
+│   ├── INTENT
+│   │   ├── CLAWDBOT_EVALUATION.md
+│   │   ├── CUSTOM_AGENT_V0.md
+│   │   ├── GATEWAY_DESIGN_V0.md
+│   │   ├── README.md
+│   │   └── REFERENCES
+│   ├── LOG.md
+│   ├── log.sh
+│   ├── MASTER_ROADMAP.md
+│   ├── ONBOARDING.md
+│   ├── RULES.md
+│   ├── settings.local.json
+│   ├── STATE.md
+│   ├── TODO.md
+│   ├── tree.sh
+│   ├── TREE.txt
+│   └── WORKFLOW.md
 ├── CLAUDE.md
-└── .claude
-    ├── ABSTRACTIONS.md
-    ├── BOOTSTRAP.md
-    ├── DERIVED_CONTEXT.DATA.md
-    ├── DERIVED_CONTEXT.md
-    ├── INTENT
-    │   ├── CLAWDBOT_EVALUATION.md
-    │   ├── GATEWAY_DESIGN_V0.md
-    │   ├── MASTER_ROADMAP.md
-    │   ├── README.md
-    │   └── REFERENCES
-    ├── LOG.md
-    ├── log.sh
-    ├── ONBOARDING.md
-    ├── RULES.md
-    ├── settings.local.json
-    ├── STATE.md
-    ├── TODO.md
-    ├── tree.sh
-    ├── TREE.txt
-    └── WORKFLOW.md
+├── config
+│   ├── settings.example.yaml
+│   └── settings.local.yaml
+├── docs
+│   └── ARCHITECTURE.md
+├── .gitignore
+├── goals_and_architecture.txt
+├── pyproject.toml
+├── .python-version
+├── requirements.txt
+├── src
+│   ├── adapters
+│   │   ├── __init__.py
+│   │   ├── memory_emulator.py
+│   │   ├── telegram_emulator.py
+│   │   └── tool_registry.py
+│   ├── cli
+│   │   ├── __init__.py
+│   │   ├── memory_cli.py
+│   │   ├── run_agent.py
+│   │   └── send_message.py
+│   ├── cloudcode_prompts
+│   │   ├── examples.md
+│   │   ├── output_format.md
+│   │   ├── system_context.md
+│   │   └── tool_contract.md
+│   ├── __init__.py
+│   └── runner
+│       ├── agent_runner.py
+│       ├── cloudcode_bridge.py
+│       ├── __init__.py
+│       ├── logging_utils.py
+│       ├── plan_schema.py
+│       └── time_utils.py
+├── state
+│   ├── agent_state.json
+│   ├── conversations
+│   │   └── .gitkeep
+│   ├── .gitkeep
+│   └── memory
+│       └── .gitkeep
+├── TELEGRAM_BOT_SPEC.md
+└── tests
+    ├── __init__.py
+    ├── test_agent_runner.py
+    ├── test_cloudcode_bridge.py
+    ├── test_e2e.py
+    ├── test_memory_emulator.py
+    ├── test_plan_schema.py
+    ├── test_telegram_emulator.py
+    └── test_tool_registry.py
 
-3 directories, 20 files
-
-# Last updated: 2026-02-04
+14 directories, 61 files

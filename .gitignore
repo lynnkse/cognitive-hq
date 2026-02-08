@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# State (runtime data, not committed)
+state/agent_state.json
+state/telegram_inbox.jsonl
+state/telegram_outbox.jsonl
+state/conversations/*.jsonl
+state/memory/memory_store.jsonl
+state/memory/memory_index.json
+
+# Config (local overrides)
+config/settings.local.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

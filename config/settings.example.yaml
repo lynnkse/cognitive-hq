@@ -1,0 +1,21 @@
+# CloudCode Agent — Configuration
+# Copy this file to settings.local.yaml and customize.
+
+agent:
+  poll_interval_seconds: 2
+  max_transcript_messages: 20
+
+cloudcode:
+  model: haiku
+  timeout_seconds: 30
+
+telegram:
+  mode: emulator  # "emulator" or "live"
+
+memory:
+  mode: emulator  # "emulator" or "vector_db"
+  search_results_k: 5
+
+logging:
+  level: INFO
+  log_dir: state/conversations
