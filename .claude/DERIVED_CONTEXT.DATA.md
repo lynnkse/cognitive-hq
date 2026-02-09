@@ -4,7 +4,7 @@ This file is NON-AUTHORITATIVE. See DERIVED_CONTEXT.md for rules.
 
 ---
 
-## Repository Purpose (Updated 2026-02-07)
+## Repository Purpose (Updated 2026-02-08)
 
 cognitive-hq serves two purposes:
 
@@ -52,62 +52,89 @@ Build a personal command center that supports:
 - CloudCode invoked only when there's an inbound message to process
 
 ### 5. Modular Emulators -> Real Services
-- Telegram emulator (file/CLI) -> real Telegram bot
+- Telegram emulator (queue/socket) -> real Telegram bot (guide written: `docs/TELEGRAM_SWAP_GUIDE.md`)
 - Memory emulator (JSONL) -> vector DB
 - Local runner -> Google Cloud VM
 
+### 6. Unix Domain Sockets for IPC (Decision 2026-02-08)
+- Cross-process messaging uses Unix domain sockets, not shared files
+- Socket at `state/agent.sock` (exists while agent runs)
+- Protocol: newline-delimited JSON, one request-response per connection
+- InboxServer runs as daemon thread inside agent process, feeds a `queue.Queue`
+- Inbox JSONL still written (by server, single-writer) for audit/persistence
+- Memory stays in-process (no cross-process callers) — add socket only when needed
+
 ---
 
-## Current Phase: MVP COMPLETE — Awaiting Manual Testing
+## Current Phase: MVP + Socket IPC Complete — Awaiting Manual Testing
 
-**Status:** All code implemented, 90 automated tests passing. Next: human tests with real CloudCode.
+**Status:** All code implemented, 105 automated tests passing. Next: human tests with real CloudCode.
 
-**Architecture source:** `goals_and_architecture.txt` (repo root)
+**Testing guide:** `docs/INTERACTIVE_TESTING_GUIDE.md`
+
+**Test command:** `~/.pyenv/versions/3.11.9/bin/python3 -m pytest tests/ -v`
+(`.python-version` points to Python 3.8 which is incompatible. Use 3.11.9 explicitly.)
 
 ### Components (all implemented)
 
-| Component | File(s) | Status |
-|-----------|---------|--------|
-| Agent Runner | `src/runner/agent_runner.py` | Done (14 tests) |
-| CloudCode Bridge | `src/runner/cloudcode_bridge.py` | Done (13 tests) |
-| Plan Schema | `src/runner/plan_schema.py` | Done (10 tests) |
-| Telegram Emulator | `src/adapters/telegram_emulator.py` | Done (16 tests) |
-| Memory Emulator | `src/adapters/memory_emulator.py` | Done (14 tests) |
-| Tool Registry | `src/adapters/tool_registry.py` | Done (10 tests) |
-| Prompt Pack | `src/cloudcode_prompts/` | Done |
-| CLI: run_agent | `src/cli/run_agent.py` | Done |
-| CLI: send_message | `src/cli/send_message.py` | Done |
+| Component | File(s) | Tests |
+|-----------|---------|-------|
+| Agent Runner | `src/runner/agent_runner.py` | 14 |
+| CloudCode Bridge | `src/runner/cloudcode_bridge.py` | 13 |
+| Plan Schema | `src/runner/plan_schema.py` | 10 |
+| Telegram Emulator | `src/adapters/telegram_emulator.py` | 16 |
+| Inbox Server (socket) | `src/adapters/inbox_server.py` | 11 |
+| Inbox Client (socket) | `src/adapters/inbox_client.py` | 4 |
+| Memory Emulator | `src/adapters/memory_emulator.py` | 14 |
+| Tool Registry | `src/adapters/tool_registry.py` | 10 |
+| Prompt Pack | `src/cloudcode_prompts/` | — |
+| CLI: run_agent | `src/cli/run_agent.py` | — |
+| CLI: send_message | `src/cli/send_message.py` | — |
 | CLI: memory_cli | `src/cli/memory_cli.py` | Stub only |
-| Logging | `src/runner/logging_utils.py` | Done |
-| Time Utils | `src/runner/time_utils.py` | Done |
-| E2E Tests | `tests/test_e2e.py` | Done (13 tests) |
+| Logging | `src/runner/logging_utils.py` | — |
+| Time Utils | `src/runner/time_utils.py` | — |
+| E2E Tests | `tests/test_e2e.py` | 13 |
 
 ### Data Flow (One Cycle)
-1. User sends message via `send_message.py` -> appends to `state/telegram_inbox.jsonl`
-2. Agent runner detects new inbound message
-3. Agent runner prepares CloudCode input: user message + recent transcript + agent state + tool schemas
-4. CloudCode returns JSON plan: `{assistant_message, tool_calls, state_patch, notes}`
-5. Agent runner executes tool calls in order, sends responses, persists state
-6. Loop waits for next input
 
-### How to Run (3 terminals)
+```
+send_message.py  ---Unix socket--->  InboxServer (daemon thread)
+                                          |
+                                          v  (persist to inbox JSONL for audit)
+                                          v  (push to queue.Queue)
+                                          |
+AgentRunner._tick()  <---poll_inbox()---  TelegramEmulator (drains queue)
+     |
+     v
+CloudCodeBridge.invoke()  -->  claude -p <prompt> --model haiku --no-input
+     |
+     v  (parse JSON response into ExecutionPlan)
+     |
+ToolRegistry.execute_all(plan.tool_calls)
+     |
+     ├── telegram_send_message  -->  outbox JSONL
+     ├── memory_put             -->  memory JSONL
+     ├── memory_search          -->  in-memory scan
+     └── memory_get_latest      -->  in-memory scan
+     |
+     v  (apply state_patch, log transcript)
+     |
+Loop waits for next message
+```
 
-**Terminal 1 — Claude Code** (development/debugging):
-```
-claude
-```
+### How to Run (2 terminals)
 
-**Terminal 2 — Agent Runner** (always-on, waiting for messages):
+**Terminal 1 — Agent Runner** (always-on, waiting for messages):
 ```
-python src/cli/run_agent.py
+python3 src/cli/run_agent.py
 # Options: --model haiku --poll-interval 2 --timeout 30 --log-level INFO
 ```
 
-**Terminal 3 — Send Messages** (simulates Telegram):
+**Terminal 2 — Send Messages** (via Unix socket):
 ```
-python src/cli/send_message.py "hello agent"
-python src/cli/send_message.py "remember that I prefer Python"
-python src/cli/send_message.py "what do you know about me?"
+python3 src/cli/send_message.py "hello agent"
+python3 src/cli/send_message.py "remember that I prefer Python"
+python3 src/cli/send_message.py "what do you know about me?"
 ```
 
 ### Observing Results
@@ -115,6 +142,7 @@ python src/cli/send_message.py "what do you know about me?"
 - Memory entries: `state/memory/memory_store.jsonl`
 - Session transcript: `state/conversations/session_YYYYMMDD.jsonl`
 - Agent state: `state/agent_state.json`
+- Inbound audit log: `state/telegram_inbox.jsonl`
 
 ### CloudCode Output Schema
 ```json
@@ -136,15 +164,17 @@ python src/cli/send_message.py "what do you know about me?"
 
 ---
 
-## Resolved Questions (from MVP implementation)
+## Resolved Questions
 
 | Question | Answer |
 |----------|--------|
-| Python version? | 3.10+ (pyenv virtualenv `anplos-video`, Python 3.12.3) |
+| Python version? | 3.10+ required. Use `~/.pyenv/versions/3.11.9/bin/python3`. |
 | How to invoke CloudCode? | `claude -p <prompt> --model <model> --no-input` via subprocess |
 | Async or polling? | Simple polling loop (`time.sleep`) — good enough for MVP |
 | CloudCode error handling? | `CloudCodeError` exception, caught in runner, logged in transcript, loop continues |
 | Config format? | YAML — `config/settings.example.yaml` has all settings |
+| Cross-process IPC? | Unix domain sockets at `state/agent.sock`. Newline-delimited JSON protocol. |
+| File-based race conditions? | Solved. Inbox uses sockets. Outbox is single-writer. Memory is in-process. |
 
 ## Remaining Open Questions
 
@@ -158,9 +188,16 @@ python src/cli/send_message.py "what do you know about me?"
 
 | File | Purpose |
 |------|---------|
-| `goals_and_architecture.txt` | Authoritative architecture spec for custom agent |
 | `src/cli/run_agent.py` | Start the agent |
-| `src/cli/send_message.py` | Send a message to the agent |
-| MASTER_ROADMAP.md | High-level project vision and roadmap |
-| LOG.md | Human decisions and reasoning |
-| TODO.md | Task tracking |
+| `src/cli/send_message.py` | Send a message to the agent (via socket) |
+| `src/adapters/inbox_server.py` | Unix socket server (inbound messages) |
+| `src/adapters/inbox_client.py` | Unix socket client (used by send_message.py) |
+| `src/adapters/telegram_emulator.py` | Queue-based inbox, file-based outbox |
+| `src/adapters/memory_emulator.py` | JSONL-based long-term memory |
+| `src/runner/agent_runner.py` | Always-on polling loop |
+| `src/runner/cloudcode_bridge.py` | Invokes Claude CLI, parses JSON plans |
+| `docs/INTERACTIVE_TESTING_GUIDE.md` | How to test everything interactively |
+| `docs/TELEGRAM_SWAP_GUIDE.md` | How to swap emulator for real Telegram bot |
+| `.claude/INTENT/CUSTOM_AGENT_V0.md` | Authoritative design intent for the agent |
+| `.claude/LOG.md` | Human decisions and reasoning |
+| `.claude/TODO.md` | Task tracking |

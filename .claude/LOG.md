@@ -146,3 +146,51 @@ Key files:
 3. Terminal 3: `python src/cli/send_message.py "hello"` (send messages, observe replies)
 
 ---
+
+### 2026-02-08 — Socket IPC: Replace File-Based Messaging with Unix Domain Sockets
+
+**Decision:** Replace the file-based cross-process communication (JSONL inbox) with Unix domain sockets.
+
+**Reason:** The previous approach had `send_message.py` (process 2) appending to a shared JSONL file that `agent_runner.py` (process 1) read from. Two processes sharing a file without locking creates race condition risk as the system scales. Unix sockets provide a proper IPC channel — fast, no network overhead, same-machine only.
+
+**Scope:** Only the inbound message path was changed (user → agent). Outbox stays file-based (single writer, no race condition). Memory stays in-process (only one caller).
+
+**What was built:**
+- `src/adapters/inbox_server.py` — Unix domain socket server (`InboxServer` class). Runs in a daemon thread inside the agent process. Listens on `state/agent.sock`. On each connection: reads JSON message, assigns `ts` + `message_id`, persists to inbox JSONL (audit trail, single writer), pushes to a thread-safe `queue.Queue`, sends back ack. Cleans up socket file on start/stop.
+- `src/adapters/inbox_client.py` — Socket client (`send_to_agent()` function). Connects, sends newline-delimited JSON, reads ack, disconnects. Raises `AgentNotRunningError` if socket missing.
+- `tests/test_inbox_server.py` (11 tests), `tests/test_inbox_client.py` (4 tests)
+
+**What was refactored:**
+- `TelegramEmulator` — inbox changed from file-based (read JSONL + offset tracking) to queue-based (drain `queue.Queue`). Constructor now takes `outbox_path` and optional `inbox_queue`. `enqueue_message()` puts directly into queue (for tests/in-process use). `poll_inbox()` drains queue non-blocking.
+- `AgentRunner` — new optional `socket_path` param. When set, creates and manages `InboxServer` lifecycle (start before loop, stop in finally block). When None (in tests), no server — tests inject messages via `enqueue_message()`.
+- `send_message.py` — now uses `send_to_agent()` socket client instead of creating a `TelegramEmulator` and writing files.
+- `run_agent.py` — passes `socket_path=Path("state/agent.sock")` to runner.
+
+**Protocol:** Newline-delimited JSON over Unix socket.
+- Client sends: `{"type":"user_message","chat_id":"local-test","text":"hello"}\n`
+- Server responds: `{"status":"ok","message_id":"...","ts":"..."}\n`
+- One request-response per connection, then disconnect.
+
+**Test suite:** 90 → 105 tests, all passing.
+
+**Design rationale for keeping memory in-process:** Memory emulator is only called by the agent runner (same process). No cross-process boundary = no race condition. Sockets for memory would add complexity (separate server process, serialization overhead, lifecycle management) for zero benefit. Add a socket service for memory only when a second process needs access.
+
+**Note for INTENT:** `CUSTOM_AGENT_V0.md` "Known Tradeoffs" item #2 states "File-based message queue (JSONL) has no locking. Fine for single-user local prototype. Must be replaced for production." This is now resolved — the inbox path uses sockets.
+
+**Commit:** `6db9eb0 cleanup`
+
+---
+
+### 2026-02-08 — Documentation: Interactive Testing Guide + Telegram Swap Guide
+
+**Created:**
+- `docs/INTERACTIVE_TESTING_GUIDE.md` — Step-by-step guide for manually testing the agent, memory system, and Telegram emulator. Covers 2-terminal setup, where to observe results, Python REPL testing, 4-terminal real-time monitoring, troubleshooting, and verification checklist.
+- `docs/TELEGRAM_SWAP_GUIDE.md` — Complete instructions for swapping the Telegram emulator for a real Telegram bot. Covers the interface contract, step-by-step implementation using `python-telegram-bot`, config changes, security notes (token safety, `allowed_chat_ids`), and rollback instructions.
+
+---
+
+### 2026-02-08 — Observation: Python Environment
+
+The `.python-version` file points to `mrbsp3810` (Python 3.8.10), which is incompatible with the codebase (requires 3.10+ for `dict[str, Any]` syntax and Pydantic v2). Tests must be run with `~/.pyenv/versions/3.11.9/bin/python3 -m pytest tests/ -v`. Consider updating `.python-version` to a 3.11+ environment with deps installed.
+
+---

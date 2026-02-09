@@ -1,4 +1,4 @@
-/home/lynnkse/cognitive-hq
+/home/anton/cognitive-hq
 ├── AGENT_RECREATION_GUIDE.md
 ├── .claude
 │   ├── ABSTRACTIONS.md
@@ -9,8 +9,7 @@
 │   │   ├── CLAWDBOT_EVALUATION.md
 │   │   ├── CUSTOM_AGENT_V0.md
 │   │   ├── GATEWAY_DESIGN_V0.md
-│   │   ├── README.md
-│   │   └── REFERENCES
+│   │   └── README.md
 │   ├── LOG.md
 │   ├── log.sh
 │   ├── MASTER_ROADMAP.md
@@ -24,17 +23,19 @@
 │   └── WORKFLOW.md
 ├── CLAUDE.md
 ├── config
-│   ├── settings.example.yaml
-│   └── settings.local.yaml
+│   └── settings.example.yaml
 ├── docs
-│   └── ARCHITECTURE.md
+│   ├── ARCHITECTURE.md
+│   ├── INTERACTIVE_TESTING_GUIDE.md
+│   └── TELEGRAM_SWAP_GUIDE.md
 ├── .gitignore
-├── goals_and_architecture.txt
 ├── pyproject.toml
 ├── .python-version
 ├── requirements.txt
 ├── src
 │   ├── adapters
+│   │   ├── inbox_client.py
+│   │   ├── inbox_server.py
 │   │   ├── __init__.py
 │   │   ├── memory_emulator.py
 │   │   ├── telegram_emulator.py
@@ -43,7 +44,9 @@
 │   │   ├── __init__.py
 │   │   ├── memory_cli.py
 │   │   ├── run_agent.py
-│   │   └── send_message.py
+│   │   ├── send_message.py
+│   │   └── state
+│   │       └── telegram_inbox.jsonl
 │   ├── cloudcode_prompts
 │   │   ├── examples.md
 │   │   ├── output_format.md
@@ -58,21 +61,23 @@
 │       ├── plan_schema.py
 │       └── time_utils.py
 ├── state
-│   ├── agent_state.json
 │   ├── conversations
 │   │   └── .gitkeep
 │   ├── .gitkeep
-│   └── memory
-│       └── .gitkeep
+│   ├── memory
+│   │   └── .gitkeep
+│   └── telegram_inbox.jsonl
 ├── TELEGRAM_BOT_SPEC.md
 └── tests
     ├── __init__.py
     ├── test_agent_runner.py
     ├── test_cloudcode_bridge.py
     ├── test_e2e.py
+    ├── test_inbox_client.py
+    ├── test_inbox_server.py
     ├── test_memory_emulator.py
     ├── test_plan_schema.py
     ├── test_telegram_emulator.py
     └── test_tool_registry.py
 
-14 directories, 61 files
+14 directories, 66 files

@@ -44,9 +44,10 @@ It is the authoritative source for task management alongside LOG.md.
 ## Pending Tasks
 
 ### [ ] Future: Replace Telegram emulator with real bot
-**Priority:** LOW
+**Priority:** MEDIUM
 **Created:** 2026-02-06
 **Blocked by:** Manual E2E test
+**Guide:** `docs/TELEGRAM_SWAP_GUIDE.md` has complete step-by-step instructions. Bot already created via @BotFather.
 
 ---
 
@@ -71,22 +72,15 @@ It is the authoritative source for task management alongside LOG.md.
 
 ---
 
-### [ ] Future: Multi-process architecture & IPC
-**Priority:** LOW
-**Created:** 2026-02-07
-**Blocked by:** Manual E2E test
+### [ ] Fix Python environment (.python-version)
+**Priority:** MEDIUM
+**Created:** 2026-02-08
 
-**Context:** Currently everything runs in a single Python process with direct function calls. If we later need multiple independent agent processes (e.g., separate memory service, multiple agent brains, parallel tool executors), we'll need inter-process communication.
+`.python-version` points to `mrbsp3810` (Python 3.8.10), incompatible with the codebase (requires 3.10+). Either:
+1. Create a new pyenv virtualenv with Python 3.11+ and required deps (`pytest`, `pydantic`, `pyyaml`)
+2. Or update `.python-version` to point to `3.11.9` and install deps there
 
-**Options to evaluate when the time comes:**
-- Unix/TCP sockets (lightweight, no dependencies)
-- ZeroMQ (fast, flexible patterns: pub/sub, req/rep, push/pull)
-- Redis pub/sub (if we already use Redis for memory/state)
-- gRPC (typed contracts, good for structured services)
-- Simple HTTP/REST (universal, easy to debug)
-- ROS2-style (only if robotics-adjacent or many heterogeneous nodes)
-
-**Decision deferred** — current single-process architecture is correct for now. Revisit when there's a concrete need for multiple processes.
+Currently tests must be run explicitly: `~/.pyenv/versions/3.11.9/bin/python3 -m pytest tests/ -v`
 
 ---
 
@@ -165,6 +159,24 @@ It is the authoritative source for task management alongside LOG.md.
 ### [x] MVP-7: End-to-end integration tests
 **Completed:** 2026-02-07
 **Outcome:** 13 e2e tests covering all success criteria. Full suite: 90 tests, all passing.
+
+---
+
+### [x] Socket IPC: Replace file-based inbox with Unix domain sockets
+**Completed:** 2026-02-08
+**Outcome:** Inbound messages now flow via Unix socket (`state/agent.sock`) instead of shared JSONL file. `InboxServer` (daemon thread) feeds a `queue.Queue` that `TelegramEmulator.poll_inbox()` drains. `send_message.py` connects via socket client. 15 new tests, 105 total, all passing. Commit: `6db9eb0`.
+
+---
+
+### [x] Documentation: Interactive Testing Guide + Telegram Swap Guide
+**Completed:** 2026-02-08
+**Outcome:** Created `docs/INTERACTIVE_TESTING_GUIDE.md` (how to test agent, memory, emulator interactively) and `docs/TELEGRAM_SWAP_GUIDE.md` (how to swap emulator for real Telegram bot). Commit: `6db9eb0`.
+
+---
+
+### [~] Future: Multi-process architecture & IPC
+**Partially addressed:** 2026-02-08
+**Reason:** Unix domain sockets implemented for the inbound message path (the real cross-process boundary). Full multi-process architecture (separate memory service, multiple agents) deferred until there's a concrete need.
 
 ---
 
