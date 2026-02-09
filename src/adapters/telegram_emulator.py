@@ -1,7 +1,7 @@
-"""Telegram Emulator — file/CLI-based message simulation.
+"""Telegram Emulator — message adapter.
 
-Inbound: reads from state/telegram_inbox.jsonl
-Outbound: appends to state/telegram_outbox.jsonl
+Inbound: receives from a thread-safe queue (fed by InboxServer or in-process).
+Outbound: appends to state/telegram_outbox.jsonl.
 
 Later replaced by a real Telegram bot adapter.
 """
@@ -11,33 +11,39 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
 from src.runner.time_utils import utc_now
 
-DEFAULT_INBOX_PATH = Path("state/telegram_inbox.jsonl")
 DEFAULT_OUTBOX_PATH = Path("state/telegram_outbox.jsonl")
 
 
 class TelegramEmulator:
-    """File-based Telegram message emulator."""
+    """Queue-based inbound, file-based outbound Telegram adapter."""
 
     def __init__(
         self,
-        inbox_path: Path | str = DEFAULT_INBOX_PATH,
         outbox_path: Path | str = DEFAULT_OUTBOX_PATH,
+        inbox_queue: Queue | None = None,
     ):
-        self.inbox_path = Path(inbox_path)
         self.outbox_path = Path(outbox_path)
-        self.inbox_path.parent.mkdir(parents=True, exist_ok=True)
         self.outbox_path.parent.mkdir(parents=True, exist_ok=True)
-        # Track how many inbox messages have been consumed
-        self._inbox_offset = 0
+        self._inbox_queue = inbox_queue or Queue()
+
+    @property
+    def inbox_queue(self) -> Queue:
+        """Expose the queue so InboxServer can be wired to it."""
+        return self._inbox_queue
 
     def enqueue_message(
         self, text: str, chat_id: str = "local-test"
     ) -> dict[str, Any]:
-        """Append a user message to the inbox. Returns the message record."""
+        """Put a message directly into the inbox queue (in-process path).
+
+        Used by tests and for in-process message injection.
+        For cross-process delivery, use InboxClient -> InboxServer instead.
+        """
         record = {
             "ts": utc_now(),
             "type": "user_message",
@@ -45,16 +51,21 @@ class TelegramEmulator:
             "message_id": str(uuid.uuid4()),
             "text": text,
         }
-        with open(self.inbox_path, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        self._inbox_queue.put(record)
         return record
 
     def poll_inbox(self) -> list[dict[str, Any]]:
-        """Return new (unconsumed) messages from the inbox and advance the offset."""
-        all_messages = self._load_jsonl(self.inbox_path)
-        new_messages = all_messages[self._inbox_offset:]
-        self._inbox_offset = len(all_messages)
-        return new_messages
+        """Drain all available messages from the inbox queue.
+
+        Non-blocking: returns whatever is in the queue right now.
+        """
+        messages = []
+        while True:
+            try:
+                messages.append(self._inbox_queue.get_nowait())
+            except Empty:
+                break
+        return messages
 
     def send_message(
         self,

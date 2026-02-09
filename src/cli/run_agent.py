@@ -33,14 +33,18 @@ def main():
     memory = MemoryEmulator()
     bridge = CloudCodeBridge(model=args.model, timeout_seconds=args.timeout)
 
+    socket_path = Path("state/agent.sock")
+
     runner = AgentRunner(
         telegram=telegram,
         memory=memory,
         bridge=bridge,
         poll_interval=args.poll_interval,
+        socket_path=socket_path,
     )
 
     print(f"Agent runner starting (model={args.model}, poll={args.poll_interval}s)")
+    print(f"Listening for messages on {socket_path}")
     print("Send messages with: python src/cli/send_message.py \"your message\"")
     print("Press Ctrl+C to stop.")
     runner.run()

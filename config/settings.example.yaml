@@ -4,6 +4,7 @@
 agent:
   poll_interval_seconds: 2
   max_transcript_messages: 20
+  socket_path: state/agent.sock
 
 cloudcode:
   model: haiku

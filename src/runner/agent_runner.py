@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.adapters.inbox_server import InboxServer
 from src.adapters.memory_emulator import MemoryEmulator
 from src.adapters.telegram_emulator import TelegramEmulator
 from src.adapters.tool_registry import ToolRegistry
@@ -38,6 +39,7 @@ class AgentRunner:
         conversations_dir: Path | str = DEFAULT_CONVERSATIONS_DIR,
         poll_interval: float = 2.0,
         max_transcript_messages: int = 20,
+        socket_path: Path | str | None = None,
     ):
         self.telegram = telegram
         self.memory = memory
@@ -53,9 +55,19 @@ class AgentRunner:
         self._transcript: list[dict[str, Any]] = []
         self._session_path = self._make_session_path()
 
+        # Socket server for cross-process message delivery (None in tests)
+        self._inbox_server: InboxServer | None = None
+        if socket_path is not None:
+            self._inbox_server = InboxServer(
+                queue=telegram.inbox_queue,
+                socket_path=socket_path,
+            )
+
     def run(self) -> None:
         """Start the polling loop. Blocks until stop() is called or interrupted."""
         self._running = True
+        if self._inbox_server:
+            self._inbox_server.start()
         logger.info("Agent runner started (poll_interval=%.1fs)", self.poll_interval)
         try:
             while self._running:
@@ -66,6 +78,8 @@ class AgentRunner:
             logger.info("Agent runner interrupted by user")
         finally:
             self._running = False
+            if self._inbox_server:
+                self._inbox_server.stop()
             logger.info("Agent runner stopped")
 
     def stop(self) -> None:

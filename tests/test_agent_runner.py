@@ -32,7 +32,6 @@ def make_plan(
 def env(tmp_path):
     """Set up a full agent environment with a mock bridge."""
     tg = TelegramEmulator(
-        inbox_path=tmp_path / "inbox.jsonl",
         outbox_path=tmp_path / "outbox.jsonl",
     )
     mem = MemoryEmulator(store_path=tmp_path / "memory" / "store.jsonl")

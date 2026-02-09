@@ -17,6 +17,7 @@ state/telegram_outbox.jsonl
 state/conversations/*.jsonl
 state/memory/memory_store.jsonl
 state/memory/memory_index.json
+state/agent.sock
 
 # Config (local overrides)
 config/settings.local.yaml

@@ -1,7 +1,6 @@
 """Tests for the Telegram emulator adapter."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -10,9 +9,8 @@ from src.adapters.telegram_emulator import TelegramEmulator
 
 @pytest.fixture
 def tg(tmp_path):
-    """Create a TelegramEmulator backed by temp files."""
+    """Create a TelegramEmulator with a queue-based inbox and temp outbox."""
     return TelegramEmulator(
-        inbox_path=tmp_path / "inbox.jsonl",
         outbox_path=tmp_path / "outbox.jsonl",
     )
 
@@ -30,13 +28,15 @@ class TestEnqueueMessage:
         rec = tg.enqueue_message("hi", chat_id="my-chat")
         assert rec["chat_id"] == "my-chat"
 
-    def test_appends_to_inbox_file(self, tg):
+    def test_enqueue_puts_on_queue(self, tg):
         tg.enqueue_message("first")
         tg.enqueue_message("second")
-        lines = tg.inbox_path.read_text().strip().split("\n")
-        assert len(lines) == 2
-        assert json.loads(lines[0])["text"] == "first"
-        assert json.loads(lines[1])["text"] == "second"
+        msgs = []
+        while not tg.inbox_queue.empty():
+            msgs.append(tg.inbox_queue.get_nowait())
+        assert len(msgs) == 2
+        assert msgs[0]["text"] == "first"
+        assert msgs[1]["text"] == "second"
 
     def test_unique_message_ids(self, tg):
         r1 = tg.enqueue_message("a")

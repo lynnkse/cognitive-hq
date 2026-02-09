@@ -12,7 +12,6 @@ from src.runner.plan_schema import ToolCall, ToolName
 def registry(tmp_path):
     """Create a ToolRegistry backed by temp files."""
     tg = TelegramEmulator(
-        inbox_path=tmp_path / "inbox.jsonl",
         outbox_path=tmp_path / "outbox.jsonl",
     )
     mem = MemoryEmulator(store_path=tmp_path / "memory" / "store.jsonl")
@@ -127,7 +126,6 @@ class TestIntegrationRoundTrip:
     def test_plan_to_execution(self, tmp_path):
         """Simulate dispatching a full CloudCode plan through the registry."""
         tg = TelegramEmulator(
-            inbox_path=tmp_path / "inbox.jsonl",
             outbox_path=tmp_path / "outbox.jsonl",
         )
         mem = MemoryEmulator(store_path=tmp_path / "memory" / "store.jsonl")

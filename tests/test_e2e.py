@@ -97,7 +97,6 @@ def env(tmp_path):
         (prompts_dir / name).write_text(f"# {name}")
 
     tg = TelegramEmulator(
-        inbox_path=tmp_path / "inbox.jsonl",
         outbox_path=tmp_path / "outbox.jsonl",
     )
     mem = MemoryEmulator(store_path=tmp_path / "memory" / "store.jsonl")
