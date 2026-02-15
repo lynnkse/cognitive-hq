@@ -14,6 +14,9 @@ This file defines terms used in logs and discussions.
 - **Bootstrap**: The entry point file that lists mandatory reads for Claude sessions
 - **Intent file**: Human-authored explanation of design goals and motivations
 - **Stateless workflow**: Operating without relying on chat memory; all context from files
+- **CLAUDE.md**: Instructions file telling Claude Code how to work with the code (static, operational)
+- **.claude/ directory**: Project memory and state (dynamic, historical - decisions, tasks, logs)
+- **Hierarchical context**: Multi-level CLAUDE.md files at different directory depths for scoped guidance
 
 ### Bot & Memory System Terms
 
