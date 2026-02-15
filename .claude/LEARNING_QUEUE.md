@@ -65,6 +65,22 @@ Items move through these states:
 
 ---
 
+### Context Window Management
+**Source:** Course + /context command observation
+**Date added:** 2026-02-14
+**Brief:** Managing 200k token context efficiently
+**Research:**
+- Manual vs autocompact strategies
+- Minimize memory file token usage
+- External memory (Supabase) vs in-context trade-offs
+- Progressive summarization
+- Context-aware subagent delegation
+**Potential use:** Optimize .claude/ files, improve long conversations
+**Priority:** LOW
+[SYSTEM] [AI]
+
+---
+
 ## Research — Worth Investigating
 
 <!-- Items that passed initial filter, need deeper research -->
