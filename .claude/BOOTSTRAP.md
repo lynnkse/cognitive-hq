@@ -73,6 +73,9 @@ Read the following ONLY if needed for the task:
 - .claude/ONBOARDING.md
   (for summarizing the project or helping new researchers)
 
+- .claude/LEARNING_QUEUE.md
+  (for research items from courses/papers to evaluate for implementation)
+
 ---
 
 ## Reasoning Rules

@@ -13,6 +13,22 @@ It is the authoritative source for task management alongside LOG.md.
 
 ## Pending Tasks
 
+### [ ] Review learning queue for implementation candidates
+**Priority:** LOW
+**Created:** 2026-02-14
+
+Periodically review `.claude/LEARNING_QUEUE.md` for items worth implementing.
+
+**Process:**
+1. Capture interesting concepts from courses to Inbox
+2. Evaluate and move to Research/Implement/Archive
+3. For "Implement" items, create specific tasks in this TODO
+4. Link back to learning queue entry for context
+
+**Reference:** `.claude/LEARNING_QUEUE.md`
+
+---
+
 ### [ ] Optional: Auto-channel detection for work/personal
 **Priority:** LOW
 **Created:** 2026-02-14
