@@ -30,3 +30,6 @@ config/settings.local.yaml
 
 # OS
 .DS_Store
+
+# External repos (cloned dependencies)
+claude-telegram-relay/
