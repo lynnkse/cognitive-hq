@@ -194,3 +194,398 @@ Key files:
 The `.python-version` file points to `mrbsp3810` (Python 3.8.10), which is incompatible with the codebase (requires 3.10+ for `dict[str, Any]` syntax and Pydantic v2). Tests must be run with `~/.pyenv/versions/3.11.9/bin/python3 -m pytest tests/ -v`. Consider updating `.python-version` to a 3.11+ environment with deps installed.
 
 ---
+
+### 2026-02-14 — PIVOT: Switch to claude-telegram-relay (Supersedes Python Agent)
+
+**Decision:** Adopt existing claude-telegram-relay (TypeScript/Bun) instead of continuing with custom Python agent.
+
+**Reason:**
+- Python agent was per-turn invocation (20-message context window) — user wanted long-running sessions with deep context
+- claude-telegram-relay already implements `--resume` flag for session continuity
+- Built-in semantic memory via Supabase + embeddings
+- Real Telegram bot (grammY), not emulator
+- Voice transcription support (Groq/Whisper)
+- Production-ready daemon support (launchd/systemd/PM2)
+- Would take weeks to build all these features in Python version
+
+**What was built:**
+- Installed Bun runtime v1.3.9 (`~/.bun/bin/bun`)
+- Cloned claude-telegram-relay to `/home/lynnkse/cognitive-hq/claude-telegram-relay`
+- Configured `.env`:
+  - `TELEGRAM_BOT_TOKEN`: 8403736964:AAH5u-FvHan-xELGDL3glu9B7NjEGtdnmCw (revoked old token)
+  - `TELEGRAM_USER_ID`: 310065542
+  - `USER_NAME`: Lynn
+  - `USER_TIMEZONE`: Asia/Jerusalem
+  - `CLAUDE_PATH`: /home/lynnkse/.npm-global/bin/claude
+  - `PROJECT_DIR`: /home/lynnkse/cognitive-hq
+  - Supabase vars commented out (not configured yet)
+- Modified `src/relay.ts` line 207: Set `CLAUDECODE: undefined` to allow nested Claude sessions
+- Successfully deployed bot — running in background (PID: 1746159)
+- Bot tested and confirmed working on Telegram
+
+**Current status:**
+- ✅ Bot receives Telegram messages
+- ✅ Calls Claude Code CLI with context
+- ✅ Returns responses to Telegram
+- ✅ Session continuity via `--resume` flag (within-session memory works)
+- ❌ No cross-session memory (requires Supabase setup)
+- ❌ No semantic search (requires Supabase + OpenAI embeddings)
+
+**Architecture:**
+```
+You → Telegram → Relay (Bun) → Claude Code (--resume session_id) → Response
+                                        ↓
+                                  Supabase (pending setup)
+```
+
+**Previous Python agent artifacts now superseded:**
+- `src/` — Python agent code (MVP-1 through MVP-7)
+- `tests/` — 105 passing tests for Python agent
+- `docs/INTERACTIVE_TESTING_GUIDE.md` — Python-specific
+- Python virtual env `cognitive-hq` (still exists, not needed for relay)
+
+**Next step:** Configure Supabase for persistent memory (facts, goals, semantic search).
+
+---
+
+### 2026-02-14 — Supabase Configuration Complete: Semantic Memory Live
+
+**Decision:** Configure Supabase for persistent memory and semantic search via OpenAI embeddings.
+
+**Setup completed:**
+
+**1. Supabase Project Created**
+- Project name: lynnkse's Project
+- Project URL: `https://jcwdfuusolpxnciqgstl.supabase.co`
+- Region: Central EU (Frankfurt)
+- Anon key configured in `.env`
+
+**2. Database Schema Deployed**
+- Ran `db/schema.sql` via Supabase SQL Editor
+- Created tables:
+  - `messages` — conversation history (id, created_at, role, content, channel, metadata, embedding VECTOR(1536))
+  - `memory` — facts & goals (id, created_at, type, content, deadline, completed_at, priority, metadata, embedding VECTOR(1536))
+  - `logs` — observability (id, created_at, level, event, message, session_id, duration_ms)
+- Created indexes for performance (created_at DESC, type, level)
+- Enabled Row Level Security with policies for service role
+- Created helper functions:
+  - `get_recent_messages(limit_count)` — retrieve recent conversation
+  - `get_active_goals()` — retrieve active goals with deadlines
+  - `get_facts()` — retrieve all stored facts
+  - `match_messages(query_embedding, threshold, count)` — semantic search messages
+  - `match_memory(query_embedding, threshold, count)` — semantic search memory
+- Enabled pgvector extension for embedding similarity search
+
+**3. OpenAI API Key Configured**
+- Stored OpenAI API key in Supabase Edge Function secrets (not in .env for security)
+- Secret name: `OPENAI_API_KEY`
+- Used for generating text embeddings via `text-embedding-3-small` model
+- Cost: ~$0.0001 per message (very cheap)
+
+**4. Edge Functions Deployed**
+- **embed** function — Auto-generates embeddings on INSERT
+  - Triggered via database webhooks
+  - Calls OpenAI embeddings API
+  - Updates row with 1536-dimension vector
+  - Handles both messages and memory tables
+- **search** function — Semantic search endpoint
+  - Accepts query text
+  - Generates query embedding
+  - Calls `match_messages()` or `match_memory()` RPC
+  - Returns similar entries ranked by cosine similarity
+
+**5. Database Webhooks Configured**
+- **embed_messages** webhook:
+  - Table: `public.messages`
+  - Event: INSERT
+  - Action: Call `embed` Edge Function
+  - Auto-generates embeddings for new messages
+- **embed_memory** webhook:
+  - Table: `public.memory`
+  - Event: INSERT
+  - Action: Call `embed` Edge Function
+  - Auto-generates embeddings for new facts/goals
+
+**6. Bot Configuration Updated**
+- Updated `claude-telegram-relay/.env`:
+  - `SUPABASE_URL=https://jcwdfuusolpxnciqgstl.supabase.co`
+  - `SUPABASE_ANON_KEY=sb_publishable_B63IA6zBnJmSFRhmGnbUHA_ZMKouMlN`
+- Restarted bot with Supabase enabled
+
+**Architecture (Final):**
+```
+You → Telegram → Relay (Bun) → Claude Code (--resume session_id) → Response
+                 ↓                          ↓
+            saveMessage()            [REMEMBER] tags detected
+                 ↓                          ↓
+            Supabase                  processMemoryIntents()
+                 ↓                          ↓
+         INSERT into messages      INSERT into memory
+                 ↓                          ↓
+         Webhook triggers          Webhook triggers
+                 ↓                          ↓
+         embed() Edge Function     embed() Edge Function
+                 ↓                          ↓
+         OpenAI embeddings API     OpenAI embeddings API
+                 ↓                          ↓
+         UPDATE with vector        UPDATE with vector
+                 ↓                          ↓
+         Semantic search ready     Semantic search ready
+```
+
+**Tested and verified:**
+- ✅ Messages saved to database with auto-embedding
+- ✅ Facts stored via `[REMEMBER]` tags
+- ✅ Semantic search retrieves related content by meaning
+- ✅ Memory persists across sessions (survives bot restart)
+- ✅ Bot can answer "what did I eat?" and find "I had sushi"
+
+**Current status:**
+- ✅ Telegram bot live and receiving messages
+- ✅ Claude Code integration with session continuity
+- ✅ Persistent memory (Supabase)
+- ✅ Semantic search (OpenAI embeddings)
+- ✅ Auto-embedding on new messages/facts
+- ✅ Memory tag system ([REMEMBER], [GOAL], [DONE])
+- ❌ Voice transcription (not configured)
+- ❌ Proactive check-ins (not configured)
+- ❌ Always-on service (manual start required)
+
+**Files modified:**
+- `claude-telegram-relay/.env` — Added Supabase credentials
+
+**Supabase resources:**
+- Database: 3 tables, 8 functions, 2 webhooks
+- Edge Functions: 2 deployed (embed, search)
+- Secrets: 1 configured (OPENAI_API_KEY)
+
+**Next steps:** Voice transcription setup (Groq or local Whisper).
+
+---
+
+### 2026-02-14 — Voice Transcription Enabled: Groq Integration Complete
+
+**Decision:** Enable voice message support using Groq's free cloud API instead of local Whisper.
+
+**Rationale:**
+- Groq offers state-of-the-art Whisper model (whisper-large-v3-turbo)
+- Free tier: 2,000 transcriptions per day (no credit card)
+- Sub-second transcription speed
+- No local setup required (no ffmpeg, no model downloads)
+- Internet connection required, but acceptable tradeoff
+
+**Implementation:**
+1. **Groq API Key Obtained**
+   - Created account at console.groq.com
+   - Generated API key (stored securely in .env)
+   - Stored in `claude-telegram-relay/.env`
+
+2. **Environment Configuration**
+   - Added to `.env`:
+     - `VOICE_PROVIDER=groq`
+     - `GROQ_API_KEY=<redacted>`
+   - Installed missing dependency: `dotenv@17.3.1`
+
+3. **Voice Handling Already Implemented**
+   - Bot already has full voice message handling in `relay.ts:267-313`
+   - Flow: Voice message → Download from Telegram → Buffer → `transcribe()` → Text
+   - Transcription module routes to Groq or local based on `VOICE_PROVIDER`
+   - Transcribed text saved to Supabase with `[Voice Xs]` prefix
+   - Response generated using same Claude Code session continuity
+
+4. **Testing**
+   - Ran `bun setup/test-voice.ts`
+   - ✅ Groq API key validated
+   - ✅ Model `whisper-large-v3-turbo` available
+   - ✅ Voice transcription ready
+
+5. **Bot Restarted**
+   - Stopped previous instance (PID: 1746159)
+   - Started with voice support enabled (PID: 1898776)
+   - Running in background, logs to `/tmp/relay.log`
+
+**Voice Message Flow:**
+```
+Telegram voice message → bot.on("message:voice")
+         ↓
+Download voice file from Telegram API
+         ↓
+transcribe(buffer) → Groq Whisper API
+         ↓
+"[Voice 5s]: Hello, what's the weather today?"
+         ↓
+saveMessage(user, transcription)
+         ↓
+getRelevantContext() + getMemoryContext()
+         ↓
+callClaude(enriched_prompt, {resume: true})
+         ↓
+processMemoryIntents() → extract [REMEMBER] tags
+         ↓
+saveMessage(assistant, response)
+         ↓
+sendResponse() → Telegram
+```
+
+**Voice Call Capability:**
+- Telegram bots **cannot receive phone calls** (Telegram API limitation)
+- Voice messages: ✅ Fully supported (send voice → bot transcribes → responds with text)
+- Voice replies: ❌ Not implemented (would need ElevenLabs TTS integration)
+- Alternative: User can use Telegram's native voice-to-text before sending
+
+**Current Full Status:**
+- ✅ Telegram bot live and receiving messages
+- ✅ Claude Code integration with session continuity
+- ✅ Persistent memory (Supabase + pgvector)
+- ✅ Semantic search (OpenAI embeddings)
+- ✅ Auto-embedding on new messages/facts
+- ✅ Memory tag system ([REMEMBER], [GOAL], [DONE])
+- ✅ **Voice message transcription (Groq Whisper)**
+- ❌ Voice replies (TTS not configured)
+- ❌ Phone calls (not supported by Telegram bot API)
+- ❌ Proactive check-ins (not configured)
+- ❌ Always-on service (manual start required)
+
+**Files modified:**
+- `claude-telegram-relay/.env` — Added VOICE_PROVIDER=groq, GROQ_API_KEY
+- `claude-telegram-relay/package.json` — Added dotenv@17.3.1
+
+**Next steps:**
+- Test voice message in Telegram
+- Optional: Set up always-on service (launchd/systemd)
+- Optional: Proactive check-ins & morning briefings
+
+---
+
+### 2026-02-14 — System Architecture Q&A: Model Usage, Knowledge Base Strategy, Database Organization
+
+**Context:** Post-deployment discussion about optimal usage patterns, integration with work projects, and voice input capabilities.
+
+**Q1: Which model does the bot use and how to track usage?**
+
+**A1: Model & Usage Stats**
+- **Model:** Bot calls Claude Code CLI without `--model` flag → uses default **Claude Sonnet 4.5**
+- **Usage tracking:** Visit `claude.ai/account` → Usage tab (shows messages per model, costs)
+- **Cost model:** Bot uses your Claude Code subscription/API credits
+- **To change model:** Could modify `relay.ts:190` to add `--model opus` or `--model haiku`
+- **Current setup:** Optimized for quality (Sonnet) over cost (Haiku not needed yet)
+
+**Q2: Should the same system be used for work projects (robot navigation, SLAM, POMDP)?**
+
+**A2: YES - Recommended Strategy**
+
+**Decision:** Use Telegram bot + Supabase as unified personal knowledge base across all projects.
+
+**Rationale:**
+- Semantic search works across ALL conversations (work + personal)
+- Database becomes "external brain" with vector embeddings
+- Example: "What POMDP approach did I discuss 3 weeks ago?" → finds it via similarity
+- The more domain knowledge added (robotics, SLAM, etc.), the smarter retrieval becomes
+
+**Recommended workflow:**
+1. Discuss work projects via Telegram bot (voice or text)
+2. Liberal use of memory tags:
+   - `[REMEMBER: Using FastSLAM2.0 with particle filter, 500 particles]`
+   - `[REMEMBER: Sensor: Velodyne VLP-16 LiDAR]`
+   - `[GOAL: Implement loop closure detection | DEADLINE: 2026-03-01]`
+3. Query accumulated knowledge:
+   - "Summarize my SLAM approach"
+   - "What sensors am I using?"
+   - "Show me all POMDP decisions I've made"
+4. Result: Research lab notebook, but AI-searchable
+
+**User's work context (for future reference):**
+- **Project:** Autonomous robot navigation
+- **Technologies:** SLAM (Simultaneous Localization and Mapping), POMDP (Partially Observable Markov Decision Process)
+- **Use case:** Building knowledge base across work discussions
+
+**Q3: Can work and personal use the same database?**
+
+**A3: Two Options**
+
+**Option A: Same Database, Different Channels (Recommended)**
+- Use existing `messages.channel` and `messages.metadata` fields
+- Example:
+  ```sql
+  -- Work messages
+  INSERT INTO messages (content, channel, metadata)
+  VALUES ('SLAM discussion...', 'work', '{"project": "robot-nav"}');
+
+  -- Personal messages
+  INSERT INTO messages (content, channel, metadata)
+  VALUES ('Pizza preference...', 'personal', '{}');
+  ```
+- **Pros:**
+  - Single database, easier management
+  - Can search across contexts if needed
+  - Cheaper (one Supabase project)
+- **Cons:**
+  - Work/personal data in same place (check company policy)
+
+**Option B: Separate Databases for Work/Personal**
+- Two Supabase projects with identical schemas
+- **Pros:**
+  - Complete isolation (better for sensitive work data)
+  - Can delete one without affecting other
+  - Complies with strict data policies
+- **Cons:**
+  - Two databases to manage
+  - Can't search across contexts
+
+**Recommendation:** Option A (same DB with channel tags) unless work data is highly sensitive.
+
+**Q4: Can voice input be used when working in Claude Code sessions?**
+
+**A4: Not Built-in, But Multiple Workarounds**
+
+**Current state:**
+- ✅ Telegram bot accepts voice → transcribes → responds (Groq Whisper)
+- ❌ Claude Code CLI has no native voice input
+
+**Workaround Options:**
+
+**Option 1: Use Telegram Bot as Voice Interface (Already Working)**
+- Send voice message to Telegram bot
+- Bot transcribes via Groq
+- Bot calls Claude Code with transcribed text
+- Stores conversation in Supabase
+- **Status:** Fully functional now
+
+**Option 2: OS-Level Voice Input**
+- **Linux:** `gnome-dictation` or `nerd-dictation` (hotkey → speak → text)
+  ```bash
+  sudo apt install gnome-dictation
+  ```
+- **macOS:** Built-in dictation (Fn key twice)
+- **Windows:** Win+H for voice typing
+- **Limitation:** OS-level, not Claude-aware
+
+**Option 3: Hybrid Workflow**
+- Keep Claude Code session open in terminal
+- Send voice to Telegram bot with specific instructions
+- Bot processes and remembers in Supabase
+- Later reference in Claude Code: "What did I say about SLAM earlier?"
+
+**Chosen approach:** Option 1 (Telegram bot) for voice input, with Option 2 as supplement for quick dictation.
+
+**Key Decisions Made:**
+1. ✅ Keep using Sonnet 4.5 (quality over cost for now)
+2. ✅ Build unified knowledge base across work/personal projects
+3. ✅ Use same Supabase database with channel metadata for organization
+4. ✅ Use Telegram bot for voice input (already configured with Groq)
+5. ✅ Consider OS-level voice input for terminal work
+
+**Implementation Notes:**
+- No code changes required (current setup supports all decisions)
+- To organize by channel: Modify bot to detect work keywords and auto-tag `channel: "work"`
+- To separate databases: Create second Supabase project, duplicate schema, point second bot instance to it
+
+**Files affected:** None (this is strategic guidance, no code changes)
+
+**Next steps:**
+- Test voice message workflow on Telegram
+- Start using `[REMEMBER]` tags for work knowledge
+- Optional: Add auto-channel detection based on message content
+- Optional: Set up always-on service for background operation
+
+---

@@ -7,80 +7,73 @@ It is the authoritative source for task management alongside LOG.md.
 
 ## Active Tasks
 
-### [ ] Manual E2E Test: Real CloudCode loop
-**Priority:** HIGH
-**Created:** 2026-02-07
-**Status:** Awaiting human testing
-
-**Goal:** Verify the full agent loop works with real CloudCode (not mocked).
-
-**Setup (3 terminals):**
-1. **Terminal 1** — Claude Code session (for development/debugging)
-2. **Terminal 2** — Start the agent:
-   ```
-   python src/cli/run_agent.py
-   ```
-3. **Terminal 3** — Send messages:
-   ```
-   python src/cli/send_message.py "hello agent"
-   python src/cli/send_message.py "remember that I prefer Python"
-   python src/cli/send_message.py "what do you know about me?"
-   ```
-
-**Verify:**
-- [ ] Agent starts without errors
-- [ ] Sending a message produces a reply in the terminal 2 logs
-- [ ] Reply appears in `state/telegram_outbox.jsonl`
-- [ ] Memory is stored in `state/memory/memory_store.jsonl`
-- [ ] Memory search retrieves stored entries
-- [ ] Session transcript written to `state/conversations/session_*.jsonl`
-- [ ] Agent survives if CloudCode times out or errors (keeps running)
-- [ ] Agent state persists in `state/agent_state.json`
-
-**If something fails:** fix it, re-run automated tests (`python3 -m pytest tests/ -v`), retry.
+*No active tasks currently.*
 
 ---
 
 ## Pending Tasks
 
-### [ ] Future: Replace Telegram emulator with real bot
+### [ ] Optional: Auto-channel detection for work/personal
+**Priority:** LOW
+**Created:** 2026-02-14
+
+Add automatic channel tagging to relay.ts based on message content.
+
+**Implementation:**
+- Detect work keywords: "SLAM", "POMDP", "robot", "navigation", "particle filter"
+- Auto-set `channel: "work"` and `metadata: {"domain": "robotics"}`
+- Personal keywords: "food", "workout", "personal"
+- Default: `channel: "telegram"`
+
+**File:** `claude-telegram-relay/src/memory.ts` (add keyword detection)
+
+---
+
+### [ ] Optional: Install OS-level voice input for terminal
+**Priority:** LOW
+**Created:** 2026-02-14
+
+Set up gnome-dictation or nerd-dictation for voice-to-text in terminal.
+
+```bash
+sudo apt install gnome-dictation
+# Configure hotkey in system settings
+```
+
+**Use case:** Quick voice input when working in Claude Code terminal session (supplement to Telegram bot voice)
+
+---
+
+### [ ] Future: Proactive check-ins & morning briefing
+**Priority:** LOW
+**Created:** 2026-02-14
+
+Enable smart check-ins and daily briefings using example scripts in `claude-telegram-relay/examples/`
+
+**Guide:** `claude-telegram-relay/CLAUDE.md` Phase 6
+
+---
+
+### [ ] Future: Deploy relay to always-on service
+**Priority:** LOW
+**Created:** 2026-02-14
+
+Configure as background service (launchd/systemd/PM2) for auto-start on boot.
+
+**Guide:** `claude-telegram-relay/CLAUDE.md` Phase 5
+
+---
+
+### [ ] Future: Integrate .claude/ context into relay prompts
 **Priority:** MEDIUM
-**Created:** 2026-02-06
-**Blocked by:** Manual E2E test
-**Guide:** `docs/TELEGRAM_SWAP_GUIDE.md` has complete step-by-step instructions. Bot already created via @BotFather.
+**Created:** 2026-02-14
 
----
+Modify `buildPrompt()` in relay.ts to include project context from .claude/ files:
+- BOOTSTRAP.md, RULES.md (if PROJECT_DIR has .claude/)
+- Recent LOG.md entries (last 10)
+- Active TODO.md tasks
 
-### [ ] Future: Replace memory emulator with vector DB
-**Priority:** LOW
-**Created:** 2026-02-06
-**Blocked by:** Manual E2E test
-
----
-
-### [ ] Future: Deploy to Google Cloud VM
-**Priority:** LOW
-**Created:** 2026-02-06
-**Blocked by:** Manual E2E test
-
----
-
-### [ ] Future: Add scheduler / proactive tasks
-**Priority:** LOW
-**Created:** 2026-02-06
-**Blocked by:** Manual E2E test
-
----
-
-### [ ] Fix Python environment (.python-version)
-**Priority:** MEDIUM
-**Created:** 2026-02-08
-
-`.python-version` points to `mrbsp3810` (Python 3.8.10), incompatible with the codebase (requires 3.10+). Either:
-1. Create a new pyenv virtualenv with Python 3.11+ and required deps (`pytest`, `pydantic`, `pyyaml`)
-2. Or update `.python-version` to point to `3.11.9` and install deps there
-
-Currently tests must be run explicitly: `~/.pyenv/versions/3.11.9/bin/python3 -m pytest tests/ -v`
+This would make the bot project-aware and able to answer questions about cognitive-hq status.
 
 ---
 
@@ -97,6 +90,30 @@ Currently tests must be run explicitly: `~/.pyenv/versions/3.11.9/bin/python3 -m
 ### [~] Phase 3: Logging subsystem (OpenClaw-based)
 **Cancelled:** 2026-02-06
 **Reason:** Deferred. Will revisit after custom agent MVP.
+
+### [~] Manual E2E Test: Real CloudCode loop (Python agent)
+**Cancelled:** 2026-02-14
+**Reason:** Python agent superseded by claude-telegram-relay. Python agent was per-turn invocation; relay provides superior architecture with session continuity.
+
+### [~] Replace Telegram emulator with real bot (Python agent)
+**Cancelled:** 2026-02-14
+**Reason:** Python agent superseded. Real Telegram bot now working via claude-telegram-relay.
+
+### [~] Replace memory emulator with vector DB (Python agent)
+**Cancelled:** 2026-02-14
+**Reason:** Python agent superseded. Semantic memory via Supabase is the path forward (pending setup).
+
+### [~] Deploy to Google Cloud VM (Python agent)
+**Cancelled:** 2026-02-14
+**Reason:** Python agent superseded. Future deployment will use relay instead.
+
+### [~] Add scheduler / proactive tasks (Python agent)
+**Cancelled:** 2026-02-14
+**Reason:** Python agent superseded. Relay has built-in examples for this (smart-checkin.ts, morning-briefing.ts).
+
+### [~] Fix Python environment (.python-version)
+**Cancelled:** 2026-02-14
+**Reason:** No longer critical. Python agent superseded by TypeScript/Bun relay. Python env still exists but not actively used.
 
 ---
 
@@ -177,6 +194,60 @@ Currently tests must be run explicitly: `~/.pyenv/versions/3.11.9/bin/python3 -m
 ### [~] Future: Multi-process architecture & IPC
 **Partially addressed:** 2026-02-08
 **Reason:** Unix domain sockets implemented for the inbound message path (the real cross-process boundary). Full multi-process architecture (separate memory service, multiple agents) deferred until there's a concrete need.
+
+---
+
+### [x] Install Bun runtime
+**Completed:** 2026-02-14
+**Outcome:** Bun v1.3.9 installed to `~/.bun/bin/bun`. Required for claude-telegram-relay (TypeScript runtime).
+
+---
+
+### [x] Deploy Telegram bot via claude-telegram-relay
+**Completed:** 2026-02-14
+**Outcome:**
+- Cloned relay to `/home/lynnkse/cognitive-hq/claude-telegram-relay`
+- Configured `.env` with bot token, user ID, Claude path, project directory
+- Modified `relay.ts` to allow nested Claude sessions (CLAUDECODE env var)
+- Bot deployed and running in background (PID: 1746159)
+- Successfully tested: bot receives messages, calls Claude Code, returns responses
+- Session continuity working via `--resume` flag
+- Memory tags ([REMEMBER], [GOAL]) being generated but not persisted (needs Supabase)
+
+---
+
+### [x] Fixed Python environment for cognitive-hq project
+**Completed:** 2026-02-14
+**Outcome:** Created `cognitive-hq` virtualenv with Python 3.11.9. Installed dependencies (pydantic, pyyaml, pytest). Updated `.python-version` to point to new virtualenv. All 105 tests passing.
+
+---
+
+### [x] Configure Supabase for Persistent Memory
+**Completed:** 2026-02-14
+**Outcome:**
+- Created Supabase project at https://jcwdfuusolpxnciqgstl.supabase.co
+- Deployed database schema with 3 tables (messages, memory, logs)
+- Enabled pgvector extension for semantic search
+- Deployed 2 Edge Functions (embed, search) using OpenAI embeddings
+- Configured 2 database webhooks for auto-embedding on INSERT
+- Stored OpenAI API key in Supabase secrets
+- Bot now has persistent memory across sessions
+- Semantic search working: retrieves relevant context by meaning
+- Memory tags ([REMEMBER], [GOAL], [DONE]) fully functional
+
+---
+
+### [x] Voice Transcription Setup
+**Completed:** 2026-02-14
+**Outcome:**
+- Configured Groq cloud API for voice transcription
+- Using whisper-large-v3-turbo model (state-of-the-art)
+- Free tier: 2,000 transcriptions/day
+- Bot can now transcribe Telegram voice messages to text
+- Voice handling flow: voice → download → Groq API → transcribe → Claude response
+- Verified with test script: `bun run test:voice` passed
+- Bot restarted with voice support enabled (PID: 1898776)
+- Note: Telegram bots cannot receive phone calls (API limitation)
 
 ---
 

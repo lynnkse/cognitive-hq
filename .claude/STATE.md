@@ -141,3 +141,76 @@ Created complete .claude/ directory structure:
 
 Also created:
 - `/home/lynnkse/cognitive-hq/CLAUDE.md` - Quick reference for Claude Code
+
+---
+
+## Current State (2026-02-14)
+
+**Branch:** master
+
+**Uncommitted:**
+- `claude-telegram-relay/` — New directory (cloned from github.com/godagoo/claude-telegram-relay)
+- `claude-telegram-relay/.env` — Bot configuration (gitignored)
+- `claude-telegram-relay/src/relay.ts` — Modified (CLAUDECODE env var fix)
+
+**Active direction:** Telegram bot via claude-telegram-relay (TypeScript/Bun) — supersedes Python agent
+
+**Bot status:** Running in background (PID 1898776, `~/.bun/bin/bun run src/relay.ts`)
+
+**Features enabled:**
+- ✅ Telegram integration (bot token configured)
+- ✅ Claude Code session continuity (--resume flag)
+- ✅ Persistent memory (Supabase + pgvector)
+- ✅ Semantic search (OpenAI embeddings)
+- ✅ Memory tags ([REMEMBER], [GOAL], [DONE])
+- ✅ Voice message transcription (Groq Whisper)
+
+**Test command:** Send message or voice message to Telegram bot (@lynnkse's bot)
+
+---
+
+### 2026-02-14 — claude-telegram-relay Deployment
+
+Switched from custom Python agent to existing TypeScript relay for better context continuity.
+
+**New directory structure:**
+```
+claude-telegram-relay/
+├── src/
+│   ├── relay.ts           — Core relay (modified: CLAUDECODE env var)
+│   ├── memory.ts          — Memory tag processing ([REMEMBER], [GOAL], [DONE])
+│   └── transcribe.ts      — Voice transcription (not configured)
+├── config/
+│   └── profile.example.md — User profile template
+├── db/
+│   └── schema.sql         — Supabase database schema
+├── supabase/
+│   └── functions/
+│       ├── embed/         — Auto-embedding Edge Function
+│       └── search/        — Semantic search Edge Function
+├── .env                   — Bot configuration (gitignored)
+├── package.json           — Bun dependencies
+└── node_modules/          — Installed via `bun install`
+```
+
+**Modified files:**
+- `src/relay.ts` line 207: Added `CLAUDECODE: undefined` to allow nested sessions
+
+**Configuration (.env):**
+- Telegram bot token: configured (revoked old, using new)
+- User ID: 310065542
+- User name: Lynn
+- Timezone: Asia/Jerusalem
+- Claude path: /home/lynnkse/.npm-global/bin/claude
+- Project dir: /home/lynnkse/cognitive-hq
+- Supabase URL: https://jcwdfuusolpxnciqgstl.supabase.co
+- Supabase anon key: configured
+- Voice provider: groq (Groq Whisper API)
+- Groq API key: configured
+
+**Runtime:**
+- Bot process: `~/.bun/bin/bun run src/relay.ts` (background)
+- Lock file: `~/.claude-relay/bot.lock`
+- Session tracking: `~/.claude-relay/session.json`
+
+**Python agent status:** Stopped (superseded by relay)

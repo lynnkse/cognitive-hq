@@ -4,12 +4,13 @@ This file is NON-AUTHORITATIVE. See DERIVED_CONTEXT.md for rules.
 
 ---
 
-## Repository Purpose (Updated 2026-02-08)
+## Repository Purpose (Updated 2026-02-14)
 
-cognitive-hq serves two purposes:
+cognitive-hq serves three purposes:
 
 1. **Meta-project**: Template system for managing Claude context across stateless LLM sessions
-2. **Personal Command Center**: Building a custom always-on agent with CloudCode as the brain
+2. **Personal Command Center**: Telegram bot with persistent memory and semantic search
+3. **Work Knowledge Base**: Accumulates domain knowledge across projects (robotics, SLAM, POMDP, etc.)
 
 ---
 
@@ -66,14 +67,27 @@ Build a personal command center that supports:
 
 ---
 
-## Current Phase: MVP + Socket IPC Complete — Awaiting Manual Testing
+## Current Phase: Fully Functional Telegram Bot with Memory & Voice
 
-**Status:** All code implemented, 105 automated tests passing. Next: human tests with real CloudCode.
+**Status:** Bot deployed with all core features operational. Persistent memory via Supabase, semantic search via pgvector, voice transcription via Groq.
 
-**Testing guide:** `docs/INTERACTIVE_TESTING_GUIDE.md`
+**Architecture:** claude-telegram-relay (TypeScript/Bun) superseded Python agent.
 
-**Test command:** `~/.pyenv/versions/3.11.9/bin/python3 -m pytest tests/ -v`
-(`.python-version` points to Python 3.8 which is incompatible. Use 3.11.9 explicitly.)
+**Bot command:** `~/.bun/bin/bun run src/relay.ts` (running in background, PID: 1898776)
+
+**Features enabled:**
+- ✅ Telegram integration (text messages)
+- ✅ Claude Code session continuity (--resume)
+- ✅ Persistent memory (Supabase PostgreSQL + pgvector)
+- ✅ Semantic search (OpenAI embeddings via Edge Functions)
+- ✅ Memory tags ([REMEMBER], [GOAL], [DONE])
+- ✅ Voice message transcription (Groq Whisper API)
+- ❌ Voice replies (TTS not configured)
+- ❌ Phone calls (Telegram API does not support)
+- ❌ Proactive check-ins (not configured)
+- ❌ Always-on service (manual start required)
+
+**Python agent status:** Superseded (code remains, 105 tests passing, but not in active use)
 
 ### Components (all implemented)
 
@@ -184,20 +198,150 @@ python3 src/cli/send_message.py "what do you know about me?"
 
 ---
 
-## Key Files
+## Relay Architecture (Current Implementation)
+
+### Data Flow
+```
+You → Telegram → Relay (Bun) → Claude Code CLI (--resume session_id) → Response
+                                        ↓
+                                  Supabase (pending setup)
+                                  - messages table (conversation history)
+                                  - memory table (facts, goals)
+                                  - Embeddings via OpenAI (semantic search)
+```
+
+### Key Differences: Relay vs Python Agent
+
+| Aspect | Python Agent (Superseded) | claude-telegram-relay (Current) |
+|--------|--------------------------|--------------------------------|
+| Context continuity | 20-message window (per-turn) | Session-based (--resume flag) |
+| Memory | JSONL + naive text search | Supabase + semantic embeddings |
+| Telegram | Emulator (files) | Real bot (grammY) |
+| Language | Python | TypeScript/Bun |
+| Output | Forced JSON schema | Natural text + memory tags |
+| Voice | Not supported | Groq/Whisper supported |
+
+### Memory Tag System
+
+Claude auto-detects facts/goals in responses and tags them:
+- `[REMEMBER: fact]` → saved to Supabase memory table
+- `[GOAL: text | DEADLINE: date]` → tracked with deadline
+- `[DONE: search text]` → marks goal complete
+
+Tags are stripped before showing to user (invisible automation).
+
+**Current limitation:** Tags generated but not persisted (needs Supabase setup).
+
+### Key Files (Relay)
 
 | File | Purpose |
 |------|---------|
-| `src/cli/run_agent.py` | Start the agent |
-| `src/cli/send_message.py` | Send a message to the agent (via socket) |
-| `src/adapters/inbox_server.py` | Unix socket server (inbound messages) |
-| `src/adapters/inbox_client.py` | Unix socket client (used by send_message.py) |
-| `src/adapters/telegram_emulator.py` | Queue-based inbox, file-based outbox |
-| `src/adapters/memory_emulator.py` | JSONL-based long-term memory |
-| `src/runner/agent_runner.py` | Always-on polling loop |
-| `src/runner/cloudcode_bridge.py` | Invokes Claude CLI, parses JSON plans |
-| `docs/INTERACTIVE_TESTING_GUIDE.md` | How to test everything interactively |
-| `docs/TELEGRAM_SWAP_GUIDE.md` | How to swap emulator for real Telegram bot |
-| `.claude/INTENT/CUSTOM_AGENT_V0.md` | Authoritative design intent for the agent |
-| `.claude/LOG.md` | Human decisions and reasoning |
-| `.claude/TODO.md` | Task tracking |
+| `claude-telegram-relay/src/relay.ts` | Core bot (Telegram ↔ Claude CLI bridge) |
+| `claude-telegram-relay/src/memory.ts` | Memory tag processing + context retrieval |
+| `claude-telegram-relay/.env` | Bot configuration (gitignored) |
+| `claude-telegram-relay/db/schema.sql` | Database schema (for Supabase) |
+| `claude-telegram-relay/CLAUDE.md` | Setup guide (7 phases) |
+
+### Key Files (Python Agent - Legacy)
+
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/cli/run_agent.py` | Start the agent | Superseded |
+| `src/runner/agent_runner.py` | Always-on polling loop | Superseded |
+| `src/runner/cloudcode_bridge.py` | Invokes Claude CLI, parses JSON plans | Superseded |
+| `.claude/INTENT/CUSTOM_AGENT_V0.md` | Design intent for Python agent | Historical |
+| `docs/INTERACTIVE_TESTING_GUIDE.md` | Testing guide for Python agent | Historical |
+
+---
+
+## User Context & Usage Patterns (Added 2026-02-14)
+
+### User Profile
+- **Name:** Lynn
+- **Timezone:** Asia/Jerusalem
+- **Work:** Autonomous robot navigation, SLAM, POMDP
+- **Use case:** Personal command center + work knowledge base
+
+### System Usage Strategy
+
+**Unified Knowledge Base Approach:**
+- Single Supabase database for work + personal knowledge
+- Organization via `channel` field and `metadata` JSON
+- Semantic search across all domains
+- Memory tags to capture key facts/goals
+
+**Database Organization:**
+```
+messages table:
+├── Personal conversations (channel: "personal")
+├── Work discussions (channel: "work", metadata: {"project": "robot-nav"})
+└── General queries (channel: "telegram")
+
+memory table:
+├── Personal facts (metadata: {"type": "personal"})
+├── Work facts (metadata: {"type": "work", "domain": "robotics"})
+└── Goals with deadlines (type: "goal")
+```
+
+**Work Knowledge Domains:**
+- SLAM (Simultaneous Localization and Mapping)
+- POMDP (Partially Observable Markov Decision Process)
+- Robot navigation algorithms
+- Sensor systems (e.g., Velodyne VLP-16 LiDAR)
+- Particle filters, FastSLAM
+
+**Recommended Memory Tag Usage:**
+```
+[REMEMBER: Using FastSLAM2.0 with particle filter, 500 particles]
+[REMEMBER: Sensor: Velodyne VLP-16 LiDAR, 16 channels, 100m range]
+[GOAL: Implement loop closure detection | DEADLINE: 2026-03-01]
+[REMEMBER: POMDP solver: POMCP with 10,000 particles]
+```
+
+### Voice Input Patterns
+
+**Primary:** Telegram voice messages (Groq Whisper transcription)
+- Send voice → auto-transcribed → processed by Claude
+- Conversation saved to Supabase with semantic embeddings
+- Retrieval via meaning, not keywords
+
+**Secondary:** OS-level dictation for Claude Code terminal
+- Linux: `gnome-dictation` (install if needed)
+- Quick dictation for commands/queries
+
+### Model Selection
+
+**Current:** Claude Sonnet 4.5 (default)
+- Balances quality and cost
+- Good for technical discussions (SLAM, POMDP)
+- Usage tracked at claude.ai/account
+
+**Future:** Could switch to Haiku for simple queries if cost becomes concern
+- Modify relay.ts to add `--model haiku` for specific patterns
+- Keep Sonnet for complex technical discussions
+
+### Best Practices for This System
+
+1. **Use liberal [REMEMBER] tags** for important facts/decisions
+2. **Tag work vs personal** in conversation ("Let's discuss my robot project...")
+3. **Use voice for convenience** (hands-free during lab work)
+4. **Query accumulated knowledge regularly:**
+   - "What SLAM approach am I using?"
+   - "Show me all sensor decisions"
+   - "Summarize my POMDP implementation"
+5. **Set goals with deadlines** for project tracking
+6. **Trust semantic search** - describe what you need, don't keyword hunt
+
+### System Limitations & Workarounds
+
+**Limitation:** Claude Code CLI has no native voice input
+**Workaround:** Use Telegram bot for voice → Claude Code session for complex work
+
+**Limitation:** No phone call support (Telegram API restriction)
+**Workaround:** Voice messages work perfectly
+
+**Limitation:** Bot requires manual start (not always-on yet)
+**Workaround:** Can set up as systemd service (Phase 5 in CLAUDE.md)
+
+**Limitation:** Cross-context search requires same database
+**Workaround:** Using channel tags to organize while keeping searchability

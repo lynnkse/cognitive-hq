@@ -1,4 +1,4 @@
-/home/anton/cognitive-hq
+/home/lynnkse/cognitive-hq
 ├── AGENT_RECREATION_GUIDE.md
 ├── .claude
 │   ├── ABSTRACTIONS.md
@@ -9,7 +9,8 @@
 │   │   ├── CLAWDBOT_EVALUATION.md
 │   │   ├── CUSTOM_AGENT_V0.md
 │   │   ├── GATEWAY_DESIGN_V0.md
-│   │   └── README.md
+│   │   ├── README.md
+│   │   └── REFERENCES
 │   ├── LOG.md
 │   ├── log.sh
 │   ├── MASTER_ROADMAP.md
@@ -22,8 +23,49 @@
 │   ├── TREE.txt
 │   └── WORKFLOW.md
 ├── CLAUDE.md
+├── claude-telegram-relay
+│   ├── bun.lock
+│   ├── CLAUDE.md
+│   ├── config
+│   │   └── profile.example.md
+│   ├── daemon
+│   │   ├── claude-relay.service
+│   │   ├── launchagent.plist
+│   │   └── README-WINDOWS.md
+│   ├── db
+│   │   └── schema.sql
+│   ├── .env
+│   ├── .env.example
+│   ├── examples
+│   │   ├── memory.ts
+│   │   ├── morning-briefing.ts
+│   │   ├── smart-checkin.ts
+│   │   └── supabase-schema.sql
+│   ├── .gitignore
+│   ├── LICENSE
+│   ├── package.json
+│   ├── README.md
+│   ├── setup
+│   │   ├── configure-launchd.ts
+│   │   ├── configure-services.ts
+│   │   ├── install.ts
+│   │   ├── test-supabase.ts
+│   │   ├── test-telegram.ts
+│   │   ├── test-voice.ts
+│   │   └── verify.ts
+│   ├── src
+│   │   ├── memory.ts
+│   │   ├── relay.ts
+│   │   └── transcribe.ts
+│   └── supabase
+│       └── functions
+│           ├── embed
+│           │   └── index.ts
+│           └── search
+│               └── index.ts
 ├── config
-│   └── settings.example.yaml
+│   ├── settings.example.yaml
+│   └── settings.local.yaml
 ├── docs
 │   ├── ARCHITECTURE.md
 │   ├── INTERACTIVE_TESTING_GUIDE.md
@@ -61,12 +103,13 @@
 │       ├── plan_schema.py
 │       └── time_utils.py
 ├── state
+│   ├── agent.sock
+│   ├── agent_state.json
 │   ├── conversations
 │   │   └── .gitkeep
 │   ├── .gitkeep
-│   ├── memory
-│   │   └── .gitkeep
-│   └── telegram_inbox.jsonl
+│   └── memory
+│       └── .gitkeep
 ├── TELEGRAM_BOT_SPEC.md
 └── tests
     ├── __init__.py
@@ -80,4 +123,4 @@
     ├── test_telegram_emulator.py
     └── test_tool_registry.py
 
-14 directories, 66 files
+26 directories, 97 files
