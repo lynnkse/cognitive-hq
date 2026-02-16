@@ -13,6 +13,27 @@ It is the authoritative source for task management alongside LOG.md.
 
 ## Pending Tasks
 
+### [ ] Fix bot session continuity (deferred)
+**Priority:** MEDIUM
+**Created:** 2026-02-15
+**Status:** Attempted and reverted, needs different approach
+
+**Problem:** Bot loses conversation context between messages.
+
+**Attempted solutions (all failed - see LOG.md 2026-02-15):**
+- Session ID extraction from Claude output
+- Auto-resume from ~/.claude/projects/ directory
+- Result: Catastrophic failure, bot reverted to original code
+
+**Current workaround:** Supabase semantic search + [REMEMBER] tags
+
+**Future options:**
+- Properly implement session file tracking (requires Bun compatibility fixes)
+- Accept semantic search as primary continuity mechanism
+- Investigate Claude Code API alternatives
+
+---
+
 ### [ ] Review learning queue for implementation candidates
 **Priority:** LOW
 **Created:** 2026-02-14

@@ -589,3 +589,91 @@ sendResponse() → Telegram
 - Optional: Set up always-on service for background operation
 
 ---
+
+### 2026-02-15 — Bot Session Continuity Debugging & Revert to Stable
+
+**Context:** User reported bot losing conversation context between messages ("yes what?"). Attempted to fix session continuity, encountered multiple issues.
+
+**Problem:** Bot wasn't maintaining conversation context across messages. Each message was treated as independent.
+
+**Root Cause Investigation:**
+1. Session ID not being saved to `~/.claude-relay/session.json`
+2. Discovered Claude Code doesn't output "Session ID:" in response text
+3. Found sessions are stored as UUID files in `~/.claude/projects/-home-lynnkse-cognitive-hq/`
+4. Each `.jsonl` file is a session transcript
+
+**Attempted Fixes (Failed):**
+1. **Removed `--output-format text`** to capture session ID → No session ID in output
+2. **Added debug logging** → Confirmed no "Session ID:" in stdout or stderr
+3. **Fixed Bun spawn issue** → Added `node` prefix (Bun doesn't handle shebangs properly)
+4. **Auto-resume latest session** → Attempted to read `~/.claude/projects/` directory
+   - Used `await import("fs")` which doesn't work in Bun
+   - Function `getLatestSessionId()` had syntax errors
+5. **Catastrophic failure** → Bot started sending THIS session's responses to user on Telegram!
+   - User received messages like "The relay needs write permission" and "Do you want me to: 1. Revert..."
+   - Bot was somehow connected to the active Claude Code session
+
+**Decision:** Revert all changes, restore original working bot.
+
+**Actions Taken:**
+1. Killed all running bot processes (`killall -9 bun`)
+2. Reverted `claude-telegram-relay/src/relay.ts` to original via `git checkout`
+3. Removed stale lock files
+4. Restarted bot with original code
+
+**Current Status:**
+- ✅ Bot running (PID: 2287883)
+- ✅ Responding to messages on Telegram
+- ❌ No session continuity (each message is independent)
+- ❌ User experiences: "What's my favorite color?" → "I don't have context"
+
+**Technical Findings:**
+- **Bun spawn limitation:** Doesn't handle shebang (`#!/usr/bin/env node`) properly, requires explicit `node` command
+- **Claude Code session storage:** `~/.claude/projects/<project-name>/<uuid>.jsonl` files
+- **Session resume mechanism:** `claude --resume <uuid>` expects UUID of existing session file
+- **No auto-resume built-in:** Claude Code doesn't automatically resume sessions; relay must track/specify UUID
+
+**Why Original Code Never Had Session Continuity:**
+The `claude-telegram-relay` repo's session management was incomplete:
+- Session tracking code existed (`session.sessionId`, `saveSession()`)
+- But session ID extraction failed (regex never matched)
+- `--output-format text` suppressed any potential session metadata
+- Result: Fresh session for every message
+
+**Lessons Learned:**
+1. Test incrementally - don't make multiple changes at once
+2. Bun spawn is not compatible with Node shebangs
+3. Claude Code session architecture is file-based, not API-based
+4. Session resume requires explicit UUID tracking
+5. Changes to relay.ts require careful testing before deployment
+
+**Open Questions:**
+1. How should relay properly track and resume sessions?
+   - Option A: Find latest session file in `~/.claude/projects/` before each call
+   - Option B: Track session ID in a separate file and reuse
+   - Option C: Accept no session continuity, rely on Supabase semantic search
+2. Is conversation continuity even achievable given relay architecture?
+   - Each `claude` CLI invocation is separate process
+   - Resume reuses context but may hit token limits over time
+3. Should we prioritize Supabase semantic search over session continuity?
+
+**Recommendation:**
+Use **Supabase semantic search** as the continuity mechanism instead of Claude sessions:
+- Pro: Unlimited conversation history
+- Pro: Works across bot restarts
+- Pro: Already implemented and working
+- Con: Not true "conversation" - fetches relevant past messages
+- Con: Requires explicit [REMEMBER] tags for key facts
+
+**Files Modified (then reverted):**
+- `claude-telegram-relay/src/relay.ts` — Multiple failed attempts at session tracking
+
+**Current Relay Code:** Original from github.com/godagoo/claude-telegram-relay
+
+**Next Steps:**
+1. Accept current bot behavior (no native session continuity)
+2. Document for user how to use [REMEMBER] tags effectively
+3. Test Supabase semantic search for "conversation-like" experience
+4. Consider: Is true session continuity needed, or is semantic search sufficient?
+
+---
