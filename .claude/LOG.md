@@ -677,3 +677,21 @@ Use **Supabase semantic search** as the continuity mechanism instead of Claude s
 4. Consider: Is true session continuity needed, or is semantic search sufficient?
 
 ---
+
+### 2026-02-15 — Session Continuity WORKING: Simple Per-User Implementation
+
+**Breakthrough:** User insight - THIS Claude Code session has no timeout. Why can't bot work the same way?
+
+**Solution:** Per-user session tracking. No timeouts. Let Claude's context window auto-manage.
+
+**Implementation:**
+- Store session ID per user: `~/.claude-relay/sessions/<user_id>.json`
+- Always resume user's session if it exists
+- Never expire - sessions persist indefinitely like Claude Code CLI
+- Added `node` prefix to spawn + `CLAUDECODE: undefined` env var
+
+**Status:** ✅ WORKING - Bot now has true conversation continuity
+
+**Files modified:** `claude-telegram-relay/src/relay.ts`
+
+---

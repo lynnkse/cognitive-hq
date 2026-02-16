@@ -295,3 +295,16 @@ This would make the bot project-aware and able to answer questions about cogniti
 3. **Completed**: Done with documented outcome
 4. **Deferred**: Postponed (with reason)
 5. **Cancelled**: No longer relevant (with reason)
+
+### [x] Fix bot session continuity
+**Completed:** 2026-02-15
+**Outcome:**
+- Implemented per-user persistent session tracking
+- Sessions stored in ~/.claude-relay/sessions/<user_id>.json
+- No timeouts - sessions persist indefinitely like Claude Code CLI
+- Claude's 200k context window auto-manages conversation history
+- Bot now has true conversation continuity across messages
+- Fixed spawn issues: added node prefix + CLAUDECODE: undefined
+- Status: WORKING - tested and verified
+
+---

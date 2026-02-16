@@ -155,19 +155,16 @@ Also created:
 
 **Active direction:** Telegram bot via claude-telegram-relay (TypeScript/Bun) — supersedes Python agent
 
-**Bot status:** Running in background (PID 2287883, `~/.bun/bin/bun src/relay.ts`)
+**Bot status:** Running in background (PID 2402874, `~/.bun/bin/bun src/relay.ts`)
 
 **Features enabled:**
 - ✅ Telegram integration (bot token configured)
-- ❌ Claude Code session continuity (BROKEN - attempted fix failed, reverted to original)
+- ✅ Claude Code session continuity (per-user persistent sessions - WORKING!)
 - ✅ Persistent memory (Supabase + pgvector)
 - ✅ Semantic search (OpenAI embeddings)
 - ✅ Memory tags ([REMEMBER], [GOAL], [DONE])
 - ✅ Voice message transcription (Groq Whisper configured, untested)
 
-**Known Issues (2026-02-15):**
-- **No conversation continuity:** Each message treated independently
-- **Workaround:** Use [REMEMBER] tags + Supabase semantic search
 - **See LOG.md 2026-02-15** for full debugging session details
 
 **Test command:** Send message or voice message to Telegram bot (@lynnkse's bot)
