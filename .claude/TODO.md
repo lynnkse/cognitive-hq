@@ -13,6 +13,36 @@ It is the authoritative source for task management alongside LOG.md.
 
 ## Pending Tasks
 
+### [ ] Build Claude Code hook for Supabase memory extraction
+**Priority:** HIGH
+**Created:** 2026-02-17
+
+Build a Claude Code hook that automatically extracts memories/facts from Claude Code sessions and writes them to the unified Supabase database — enabling a cognitive blueprint that spans both personal (Telegram bot) and work (Claude Code) sessions.
+
+**Goal:** Unified cross-cutting knowledge base, not project-based silos.
+
+**Reference:** GOAL logged in bot memory.
+
+---
+
+### [ ] Set up proactive check-ins and morning briefing
+**Priority:** MEDIUM
+**Created:** 2026-02-17
+
+Enable smart check-ins and daily briefings using example scripts in `claude-telegram-relay/examples/`.
+
+**Guide:** `claude-telegram-relay/CLAUDE.md` Phase 6
+
+---
+
+### [ ] Unify TODO files
+**Priority:** MEDIUM
+**Created:** 2026-02-17
+
+Consolidate task tracking back into a single `.claude/TODO.md`. Currently the bot has permission to edit this file directly, so a separate TODO_ACTIVE.md is not needed.
+
+---
+
 ### [ ] Fix bot session continuity (deferred)
 **Priority:** MEDIUM
 **Created:** 2026-02-15
@@ -81,15 +111,6 @@ sudo apt install gnome-dictation
 
 ---
 
-### [ ] Future: Proactive check-ins & morning briefing
-**Priority:** LOW
-**Created:** 2026-02-14
-
-Enable smart check-ins and daily briefings using example scripts in `claude-telegram-relay/examples/`
-
-**Guide:** `claude-telegram-relay/CLAUDE.md` Phase 6
-
----
 
 ### [ ] Future: Deploy relay to always-on service
 **Priority:** LOW
