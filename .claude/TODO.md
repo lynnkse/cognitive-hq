@@ -43,6 +43,73 @@ Consolidate task tracking back into a single `.claude/TODO.md`. Currently the bo
 
 ---
 
+### [ ] Relay v2: persistent Claude process per user + sentinel token protocol
+**Priority:** MEDIUM
+**Created:** 2026-03-28
+
+Replace the current per-message spawn architecture with a persistent Claude CLI process per user communicating via stdin/stdout pipes. See LOG.md 2026-03-28 for full design.
+
+**Architecture: ROS-style node graph (see LOG.md 2026-03-28)**
+
+Nodes:
+1. **TelegramNode** — grammY subscriber, publishes to `/user_input`
+2. **CLINode** — stdin subscriber, publishes to `/user_input`
+3. **VoiceNode** (later) — phone call stream, publishes to `/user_input`
+4. **SessionManagerNode** — owns persistent Claude process; FIFO queue per user; sentinel protocol; publishes to `/claude_response`
+5. **RouterNode** — routes `/claude_response` back to originating interface by `source` field
+6. **MemoryNode** — async Supabase writes; subscribes to `/user_input` + `/claude_response`; non-blocking
+
+Message schema on `/user_input`: `{text, source, user_id, media_path?}`
+Message schema on `/claude_response`: `{text, source, user_id}`
+
+Sentinel: system prompt requires `<<RELAY_END_<uuid>>>` at end of every response. Missing sentinel = crash/error → restart Claude process.
+
+Implementation: node graph is the pattern, not the runtime. Start with in-process event emitter; upgrade to Redis pub/sub if multi-process needed.
+
+**Multi-frontend requirement:** CLI and Telegram used simultaneously. CLI for code/files; Telegram for voice, images, mobile. Phone/voice call planned.
+
+**Open issues before full implementation:**
+- [ ] #2: Sentinel injection — who injects `<<RELAY_END_<uuid>>>` and when
+- [ ] #3: Unattended permission policy — what happens if PermissionRequest gets no response
+- [ ] #4: Multi-user process registry design
+- [ ] #5: PermissionRequest bus flow — dedicated sockets, request_id correlation
+
+**First artifact:** `claude-telegram-relay/tools/pipe_session.py` — proof of concept, spawns Claude with pipes, multiplexes keyboard↔Claude.
+
+**[ ] Test pipe_session.py**
+- Close this session
+- Run: `python3 claude-telegram-relay/tools/pipe_session.py --resume <session_id>`
+- Find session ID: `ls -t ~/.claude/projects/-home-lynnkse-cognitive-hq/*.jsonl | head -1`
+- Verify: terminal experience identical to running `claude` directly
+- Watch for: garbled colors, missing readline, buffering issues → if any, switch to `pty`
+- Report findings back to LOG.md
+
+**Reference:** LOG.md 2026-03-28/29 — full reading order in Session Continuity Note
+
+**Supersedes:**
+- `[ ] Fix quadratic token growth` (below) — that task becomes redundant if this is built
+
+**Reference:** LOG.md 2026-03-28 — Architectural Decision: Persistent Claude Process + Sentinel Token
+
+---
+
+### [ ] Fix quadratic token growth: replace --resume full replay with sliding window
+**Priority:** MEDIUM
+**Created:** 2026-03-28
+
+**Problem:** `--resume` replays the full session transcript on every message, causing O(N²) token consumption. A token from message 1 is paid for on every subsequent message. See LOG.md 2026-03-28 for full analysis.
+
+**Solution:** Replace full session replay with:
+1. Sliding window — pass only last K turns verbatim to Claude (drop `--resume`, build prompt manually)
+2. Summarization — compress turns older than K into a short summary block
+3. Semantic search — already implemented (Supabase), handles specific fact retrieval
+
+**Files to change:** `claude-telegram-relay/src/relay.ts` (`callClaude`, `buildPrompt`)
+
+**Risk:** Losing `--resume` means losing Claude's native session mechanism. Need to manually manage conversation history in the prompt.
+
+---
+
 ### [ ] Fix bot session continuity (deferred)
 **Priority:** MEDIUM
 **Created:** 2026-02-15

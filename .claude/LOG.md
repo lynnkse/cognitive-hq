@@ -695,3 +695,658 @@ Use **Supabase semantic search** as the continuity mechanism instead of Claude s
 **Files modified:** `claude-telegram-relay/src/relay.ts`
 
 ---
+
+### 2026-03-29 — Finding: Persistent Process Solves Quadratic Token Growth (O(N²) → O(N))
+
+**Context:** `--resume` with a persistent process is fundamentally different from `--resume` with per-message spawning.
+
+**Per-message spawn (relay v1):**
+```
+spawn → load full transcript → process message → exit   (pays full replay cost)
+spawn → load full transcript → process message → exit   (pays full replay cost again)
+spawn → load full transcript → process message → exit   (pays full replay cost again)
+```
+Every message pays full transcript replay. Total cost = O(N²).
+
+**Persistent process (relay v2):**
+```
+spawn → load full transcript once → stay alive
+                                         → message 2 (no reload, context in memory)
+                                         → message 3 (no reload)
+                                         → message 4 (no reload)
+```
+Transcript loaded once on startup. All subsequent messages in the same process are free — context already in RAM. Total cost = O(N).
+
+**Only exception:** if the process crashes and restarts, replay happens once. Still O(N), not O(N²).
+
+The longer the session stays alive, the better the economics. This is the core reason the persistent process architecture solves the quadratic token problem.
+
+---
+
+### 2026-03-29 — First Implementation: pipe_session.py (Proof of Concept)
+
+**Purpose:** Test whether Claude interactive mode works correctly when spawned with plain pipes instead of a real terminal.
+
+**File:** `claude-telegram-relay/tools/pipe_session.py`
+
+**What it does:**
+- Spawns Claude with `stdin=PIPE, stdout=PIPE, stderr=PIPE`
+- Three threads: keyboard→Claude stdin, Claude stdout→terminal, Claude stderr→terminal
+- Each thread is an infinite blocking loop — blocks until data arrives, forwards it, loops
+- Threads are `daemon=True` — die automatically when Claude process exits
+
+**Usage:**
+```bash
+python3 claude-telegram-relay/tools/pipe_session.py                    # new session
+python3 claude-telegram-relay/tools/pipe_session.py --resume <id>      # resume session
+```
+
+**Find current session ID:**
+```bash
+ls -t ~/.claude/projects/-home-lynnkse-cognitive-hq/*.jsonl | head -1
+# filename without .jsonl is the session ID
+```
+
+**Known risk:** Claude may detect it's not a real terminal (no `/dev/pts/X`) and behave differently — garbled colors, missing readline, buffering issues. If this happens, fix is to use Python `pty` module (pseudoterminal) instead of plain pipes. Test plain pipes first.
+
+**Status:** Written, not yet tested. Test by closing this session and running the script.
+
+---
+
+### 2026-03-29 — Architectural Decision: SessionManagerNode as stdin/stdout Multiplexer (Resolves Open Issue #1)
+
+**Context:** How does SessionManagerNode control Claude's stdin while keeping the terminal connected?
+
+**Resolution:** SessionManagerNode spawns Claude with pipes, then multiplexes all I/O through itself. Terminal stays fully connected — the node is invisible during direct CLI use.
+
+**Architecture:**
+
+```
+keyboard ──────────────────┐
+                           ▼
+/user_input.sock ──► SessionManagerNode ──► Claude stdin (pipe)
+                           ▲
+                    queue (FIFO)              │
+                                             ▼
+terminal display ◄──────────────────── Claude stdout (pipe)
+                                             │
+                                             ▼
+                                   /claude_response.sock
+```
+
+**What SessionManagerNode does:**
+- Spawns Claude with `stdin=PIPE, stdout=PIPE` (owns the process)
+- Reads from keyboard, forwards to Claude stdin
+- Reads from `/user_input.sock` (Telegram/other frontends), forwards to Claude stdin
+- Queue serializes ALL inputs (keyboard + bus) before reaching Claude stdin — one source at a time
+- Reads from Claude stdout, forwards to both terminal display AND `/claude_response.sock`
+- Session continuity preserved via `--resume <session_id>` on spawn
+
+**Key property:** Terminal experience is identical to today — type, see responses. Node is invisible. Simultaneously, Telegram messages inject via socket and responses publish to bus.
+
+**Linux file descriptor context:**
+- Every Linux process has fd0 (stdin), fd1 (stdout), fd2 (stderr) — just file descriptors pointing to any file/pipe/socket
+- By default they point to the terminal (`/dev/pts/X`)
+- When spawned with `subprocess.Popen(stdin=PIPE, stdout=PIPE)`, they point to pipes owned by the parent
+- Parent (SessionManagerNode) controls both ends — can forward to terminal AND to bus simultaneously
+
+**Implementation sketch (Python):**
+```python
+proc = subprocess.Popen(
+    ["claude", "--resume", session_id],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+)
+
+# thread 1: keyboard → Claude stdin
+# thread 2: /user_input.sock → queue → Claude stdin
+# thread 3: Claude stdout → terminal display + /claude_response.sock
+```
+
+**Open issue #1 status: RESOLVED**
+SessionManagerNode spawns Claude (not attaches). "Session is primary" reinterpreted as: session continuity (via --resume) is primary, not the process itself. Process is owned by SessionManagerNode but behaves identically from user perspective.
+
+---
+
+### 2026-03-28 — Architectural Decision: Hook Scripts in Python, Not Bash
+
+**Decision:** Hook scripts (Stop, PermissionRequest, etc.) will be written in Python, not bash.
+
+**Reason:**
+- Hook tasks (parse `.jsonl` transcript, extract last assistant message, construct JSON payload, write to Unix socket) are fragile in bash (`jq` + `nc`)
+- Python is cleaner, readable, properly handles errors
+- Same language as the rest of the core bus logic
+- Can import shared utilities from relay package later
+
+**Hook contract (language-agnostic):**
+- Receives event JSON on stdin
+- Writes response JSON to stdout (only if influencing Claude's behavior)
+- Exits with status code: 0 = success, 2 = block
+
+**Any executable works in the `command` field:**
+```json
+"command": "python3 .claude/hooks/publish_response.py"
+"command": ".claude/hooks/publish_response.sh"
+"command": "node .claude/hooks/publish_response.js"
+"command": ".claude/hooks/publish_response"  // compiled binary
+```
+
+**Hook script location:** `.claude/hooks/` directory
+
+---
+
+### 2026-03-28 — Architectural Decision: Claude Code Hooks — Key Properties
+
+**Mental model:** Hook = software interrupt + blocking subprocess callback
+
+- Event occurs (response complete, tool call, permission needed)
+- Claude Code spawns hook script as subprocess ← callback
+- `async: false` (default): Claude blocks, waits for hook exit, reads stdout/exitcode
+- `async: true`: Claude continues immediately, hook runs in background, output ignored
+- No preemption — Claude finishes current action fully before hook fires
+- Closer to ROS callback in single-threaded spinner than hardware interrupt
+
+**`async` decision per hook type:**
+- `Stop` → `async: true` (publishing to bus is observational, must not slow session)
+- `PermissionRequest` → `async: false` (Claude must wait for allow/deny before proceeding)
+- `PreToolUse` → `async: false` (must validate/modify before tool runs)
+
+**Always-on behavior:**
+- Hook fires on every matching event in the session, including conversational responses
+- Currently no Stop hook configured in this session (`.claude/settings.local.json` only has permissions)
+- Once added, fires after every response — CLI and Telegram alike
+
+**Response filtering implication:**
+- Hook publishes everything to bus unconditionally
+- RouterNode filters by `source` field — CLI messages stay in terminal, Telegram messages route to Telegram
+- No need for special sentinel variants per interface
+
+**How to add Stop hook to `settings.local.json`:**
+```json
+{
+  "permissions": { "allow": [...], "deny": [] },
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 .claude/hooks/publish_response.py",
+        "async": true
+      }]
+    }],
+    "PermissionRequest": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 .claude/hooks/permission_request.py"
+      }]
+    }]
+  }
+}
+```
+
+**Settings file scope:**
+| File | Scope | Git |
+|------|-------|-----|
+| `.claude/settings.json` | Project, shared | Yes |
+| `.claude/settings.local.json` | Project, machine-local | No |
+| `~/.claude/settings.json` | All projects on machine | No |
+
+Hook scripts go in `.claude/hooks/` — machine-specific paths → `settings.local.json` is the right home.
+
+---
+
+### 2026-03-28 — Architectural Decision: Dynamic Permission Routing in Relay v2
+
+**Context:** How does tool permission approval work when Claude is accessed via Telegram bot?
+
+**v1 approach: static pre-approval**
+Hardcoded allowlist in `.claude/settings.local.json`:
+- `Read`, `Edit`, `Write` — always allowed
+- `Bash` — only specific commands (`tree`, `ls`, `find`, `chmod`, `git add`, one specific `git commit`)
+- Everything else — blocked or prompts in terminal (unreachable from bot)
+
+**v2 approach: dynamic per-request routing via PermissionRequest hook**
+
+Claude Code's `PermissionRequest` hook fires before each tool call that requires approval. Hook intercepts it, routes through the bus to the originating interface:
+- **Telegram** → inline keyboard buttons [Allow] [Deny]
+- **CLI** → normal terminal prompt
+
+```
+Claude wants to run: git push
+        │
+PermissionRequest hook
+        │
+/permission_request.sock  →  RouterNode  →  Telegram inline buttons
+                                                    │
+                                             user taps [Allow]
+                                                    │
+/permission_response.sock  →  SessionManagerNode  →  hook returns decision
+        │
+Claude proceeds or aborts
+```
+
+New topics needed on the bus:
+- `/permission_request` — `{tool_name, tool_input, source, user_id, request_id}`
+- `/permission_response` — `{request_id, decision: "allow"|"deny"}`
+
+**Comparison:**
+
+| | v1 | v2 |
+|--|--|--|
+| Mechanism | Static allowlist | Dynamic per-request hook |
+| Approval | Pre-approved at config time | Real-time per tool call |
+| User sees | Nothing | Exact command before approving |
+| Dangerous commands | Blocked by omission | Routed for explicit approval |
+| Flexibility | Rigid | Dynamic |
+
+**Open question: unattended timeout policy**
+
+If a permission request arrives and the user doesn't respond (asleep, away), what is the default?
+- Auto-deny after N seconds — safe but blocks Claude mid-task
+- Auto-allow for low-risk tools (Read) — risky if policy is wrong
+- Queue the request, notify user, Claude waits — cleanest but requires Claude to not timeout
+
+This is a policy decision, not an architecture decision. Needs explicit design before implementation.
+
+**Status:** Design only.
+
+---
+
+### 2026-03-28 — Architectural Decision: Runtime and Transport for Relay v2
+
+**Bus transport:** Unix domain sockets (not named pipes)
+- Path: `/tmp/cognitive-hq/user_input.sock`, `/tmp/cognitive-hq/claude_response.sock`
+- Reason: supports multiple readers (debug monitor, future multi-session), same API as TCP sockets — swap address family when/if multi-machine architecture is needed
+- Wire format: newline-delimited JSON
+
+**Runtime split:**
+- **Python** — SessionManagerNode, RouterNode, MemoryNode (core bus logic)
+- **Bun/TypeScript** — TelegramNode only (already written, grammY is Node-native)
+- Components communicate via Unix sockets — runtime boundary doesn't matter
+
+**Why Python for core:**
+- User wrote Python agent from scratch (105 tests) — deep familiarity
+- SessionManagerNode owns Claude process lifecycle (crashes, restarts, pipe management) — want a trusted runtime
+- Bun has a known subprocess/shebang issue (Claude CLI uses `#!/usr/bin/env node`, Bun doesn't honor it correctly) — already hit this in v1, don't want it in the critical path
+- Python `subprocess` is robust and well understood for process management
+
+**Why keep Bun for Telegram:**
+- TelegramNode already written and working
+- grammY is Node-native
+- No process management complexity in TelegramNode
+
+---
+
+### 2026-03-28 — Architectural Decision: Claude Code Stop Hook as Session-to-Bus Bridge
+
+**Context:** How does a pre-existing Claude CLI session attach to the Relay v2 bus without special launch procedures?
+
+**Decision: Use the `Stop` hook as the publish bridge**
+
+Claude Code's `Stop` hook fires after every complete response turn. It receives `transcript_path` — the path to the live `.jsonl` session file. A hook script reads the last assistant message and writes it to the bus (Unix socket or named pipe).
+
+```json
+// .claude/settings.json
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": ".claude/hooks/publish_response.sh",
+        "async": true
+      }]
+    }]
+  }
+}
+```
+
+```bash
+# publish_response.sh
+input=$(cat)  # JSON from stdin, includes transcript_path
+transcript=$(echo "$input" | jq -r '.transcript_path')
+last_response=$(tail -n1 "$transcript" | jq -r '.message.content[-1].text')
+echo "$last_response" | nc -U /tmp/claude_response.sock
+```
+
+For input: bus writes directly to Claude's stdin via pipe, or `UserPromptSubmit` hook intercepts injected messages.
+
+**Why this is clean:**
+- Session needs no special launch procedure
+- Hook is invisible during direct terminal use
+- When relay is listening on the socket, messages flow automatically
+- Session lifecycle is fully independent of relay lifecycle
+
+**Caveats:**
+- `Stop` also fires on interrupts — need `stop_hook_active` check to avoid loops
+- Should verify sentinel token presence before publishing to bus
+- Hook fires per-turn, not per-tool-call — correct granularity for our use case
+
+**Relevant hook events (full list reviewed):**
+- `Stop` — end of Claude's response turn ← primary bridge hook
+- `UserPromptSubmit` — fires when user submits input, can inject context
+- `PostToolUse` — fires after each tool call (finer granularity, not needed here)
+- `SessionStart` — fires on session start/resume, useful for relay registration
+
+**Status:** Design only. Hook script to be implemented in Relay v2.
+
+---
+
+### 2026-03-28 — Session Continuity Note: Context for Resuming This Design Session
+
+**Purpose:** Capture everything needed to continue Relay v2 design from a fresh session.
+
+**What was designed in this session (2026-03-28):**
+
+All decisions are logged in LOG.md under 2026-03-28 entries. Read them in this order:
+1. Quadratic token growth finding (--resume replay is O(N²))
+2. Persistent Claude process + sentinel token decision
+3. Multi-frontend single-backend decision
+4. Terminal multiplexer / TUI decision
+5. ROS-style node graph decision ← canonical architecture
+6. Stop hook as session-to-bus bridge ← this entry
+
+**The canonical Relay v2 architecture (summary):**
+
+```
+[Claude CLI session] — pre-existing, independent lifecycle
+        │
+        │ Stop hook → publish_response.sh → Unix socket
+        │ UserPromptSubmit hook ← messages from bus
+        │
+   [Unix socket bus]   (/tmp/claude_response.sock, /tmp/user_input.sock)
+        │
+SessionManagerNode
+  - owns bus
+  - queues messages FIFO per user
+  - routes responses back to originating interface
+        │
+┌───────┼───────┐
+│       │       │
+TelegramNode  CLINode  VoiceNode(later)
+(grammY)      (stdin)  (phone)
+        │
+MemoryNode (async, non-blocking)
+  - Supabase writes
+  - semantic search
+```
+
+**Key decisions to remember:**
+- Session is primary, relay attaches to it — not the other way around
+- Sentinel token (`<<RELAY_END_<uuid>>>`) in system prompt marks end of every response
+- Queue serializes concurrent messages from all frontends; response tagged with source for routing
+- Implementation: in-process event emitter first, upgrade to Redis if multi-process needed
+- Bus: Unix domain sockets preferred over named pipes (multi-reader, bidirectional)
+- Testing: manual pub/sub to sockets (equivalent to `rostopic pub` / `rostopic echo`)
+- Node graph is the pattern; actual ROS not required
+
+**Current repo state:**
+- Working branch: `claude-telegram-relay` repo on branch `relay-v2`
+- Existing relay: `claude-telegram-relay/src/relay.ts` (v1, fully working)
+- All design decisions: `.claude/LOG.md` (this file), `.claude/TODO.md`
+- Relay v2 TODO entry: `.claude/TODO.md` → "Relay v2: persistent Claude process per user + sentinel token protocol"
+
+**All decisions (2026-03-28/29) in LOG.md — full reading order:**
+1. Quadratic token growth finding (O(N²) with --resume per-message spawn)
+2. Persistent Claude process + sentinel token decision
+3. Multi-frontend single-backend decision
+4. Terminal multiplexer / TUI decision
+5. ROS-style node graph decision ← canonical architecture
+6. Stop hook as session-to-bus bridge
+7. Runtime and transport (Python core, Bun TelegramNode, Unix sockets, NDJSON)
+8. Dynamic permission routing (PermissionRequest hook → Telegram inline buttons)
+9. Hook scripts in Python (not bash)
+10. Hook key properties (async for Stop, blocking for PermissionRequest)
+11. Persistent process solves O(N²) → O(N) ← important finding
+12. pipe_session.py proof of concept ← first implementation artifact
+13. SessionManagerNode as stdin/stdout multiplexer ← resolves open issue #1
+
+**Updated architecture (supersedes original sketch above):**
+```
+SessionManagerNode (Python)
+  - spawns Claude with stdin=PIPE, stdout=PIPE
+  - multiplexes: keyboard + /user_input.sock → Claude stdin (via FIFO queue)
+  - multiplexes: Claude stdout → terminal display + /claude_response.sock
+  - session continuity via --resume on spawn
+        │
+   Unix socket bus
+   /tmp/cognitive-hq/user_input.sock
+   /tmp/cognitive-hq/claude_response.sock
+   /tmp/cognitive-hq/permission_request.sock  (future)
+   /tmp/cognitive-hq/permission_response.sock (future)
+        │
+┌───────┼───────────┐
+TelegramNode    CLINode    VoiceNode(later)
+(Bun/grammY)   (stdin)
+        │
+MemoryNode (Python, async Supabase writes)
+```
+
+**Open issues remaining:**
+- #2: Sentinel injection — who injects it and when (CLAUDE.md? SessionStart hook? manual?)
+- #3: Unattended permission policy — auto-deny after timeout? queue indefinitely?
+- #4: Multi-user process registry — one SessionManagerNode, multiple Claude processes
+- #5: PermissionRequest bus flow — request_id correlation, dedicated sockets
+
+**Current repo state:**
+- Branch: `claude-telegram-relay` on `relay-v2`
+- First artifact: `claude-telegram-relay/tools/pipe_session.py` (written, not yet tested)
+- v1 relay untouched: `claude-telegram-relay/src/relay.ts`
+
+**Immediate next step:** Close this session, run `pipe_session.py`, verify terminal experience is identical to running `claude` directly. Watch for pty issues (garbled colors, missing readline).
+
+**To resume:** Read BOOTSTRAP.md, read LOG.md 2026-03-28/29 entries in order above, read TODO.md Relay v2 entry.
+
+---
+
+### 2026-03-28 — Architectural Decision: ROS-Style Node Graph for Relay v2
+
+**Context:** User has ROS background (robotics/SLAM). The multi-frontend session manager maps cleanly onto a ROS-style pub/sub node graph.
+
+**Decision: Model Relay v2 as a node graph with topics**
+
+```
+TelegramNode
+  sub: Telegram API (grammY)
+  pub: /user_input {text, source:"telegram", user_id, media_path?}
+
+CLINode
+  sub: stdin
+  pub: /user_input {text, source:"cli", user_id}
+
+VoiceNode (later)
+  sub: phone call stream
+  pub: /user_input {text, source:"voice", user_id}
+
+         /user_input topic
+                │
+                ▼
+SessionManagerNode
+  sub: /user_input
+  - owns Claude process (stdin/stdout)
+  - maintains FIFO queue per user
+  - writes to Claude stdin
+  - reads stdout until sentinel token
+  pub: /claude_response {text, source, user_id}
+
+         /claude_response topic
+                │
+                ▼
+RouterNode
+  sub: /claude_response
+  - routes by source field
+  pub: /telegram_outbox
+  pub: /cli_outbox
+  pub: /voice_outbox (later)
+
+MemoryNode
+  sub: /user_input, /claude_response
+  - saves to Supabase async (non-blocking)
+  - no effect on main pipeline latency
+```
+
+**Why this pattern fits:**
+- Queue per user falls out naturally from topic message ordering
+- New frontend = new node publishing to `/user_input`, nothing else changes
+- MemoryNode is fully decoupled — Supabase writes are async, don't block the main pipeline
+- RouterNode is thin — reads `source` field, forwards to correct outbox
+- Each node is independently restartable
+
+**Implementation note:** Actual ROS not required. The node graph is the architectural pattern, not the runtime. Can implement with:
+- In-process event emitter (simplest)
+- Redis pub/sub (if multi-process)
+- Any queue library
+
+**Relation to previous decisions:**
+- SessionManagerNode owns the persistent Claude process + sentinel protocol (LOG.md 2026-03-28)
+- RouterNode handles response routing back to originating interface (LOG.md 2026-03-28)
+- TUI/multiplexer (LOG.md 2026-03-28) sits inside CLINode as its output renderer
+
+**Status:** Design only. Supersedes the simpler "process manager + bot agent" sketch from earlier today.
+
+---
+
+### 2026-03-28 — Architectural Decision: Terminal Multiplexer / TUI for Multi-Frontend Visibility
+
+**Context:** In Relay v2, all interfaces (CLI, Telegram, voice) share one Claude process. This means Telegram messages and their responses will print inline in the terminal session, mixing with CLI work.
+
+**Finding: Shared stdin/stdout is both a feature and a UX problem**
+
+Properties of shared process:
+- Every Telegram message is visible in the terminal in real time
+- Claude's response builds in the terminal before being routed to Telegram
+- Terminal can serve as a debug/monitor view for all bot activity
+- But: Telegram responses printing mid-CLI-conversation is jarring
+
+**Decision: Terminal multiplexer (TUI) to visually separate interface streams**
+
+Each frontend gets its own pane in a TUI / tmux-style interface. All panes feed the same Claude session underneath.
+
+```
+┌─ CLI input/output ──────────────────┐
+│ > how does the relay work?          │
+│ The relay is a Telegram bot that... │
+└─────────────────────────────────────┘
+┌─ Telegram [Lynn, voice] ────────────┐
+│ [transcribed]: remind me to call... │
+│ Sure, I'll remind you at 3pm...     │
+└─────────────────────────────────────┘
+```
+
+**Implementation options:**
+- `tmux` with named panes — each interface writes to its own pane
+- Python/Node TUI library (e.g. `blessed`, `ink`) — custom layout
+- Simple approach: prefix each line with source tag (`[TG]`, `[CLI]`) and let the user filter/split manually
+
+**Status:** Design only. Lower priority than core Relay v2 components. Can be added incrementally after the session manager and queue are working.
+
+---
+
+### 2026-03-28 — Architectural Decision: Multi-Frontend Single-Backend Session Architecture
+
+**Context:** Designing Relay v2. User needs to use CLI and Telegram bot simultaneously, not as alternatives.
+
+**Finding: Concurrent multi-frontend usage is a real requirement**
+
+Usage patterns:
+- **CLI** — preferred for code work, file edits, confirmations
+- **Telegram bot** — preferred for voice notes, images, mobile/on-the-go
+- **Phone/voice call** — planned future interface
+- These are used **simultaneously**, not exclusively
+
+This rules out a simple "either/or" lock. The architecture must support multiple interfaces sending to the same Claude session concurrently.
+
+**Decision: Multi-frontend, single-backend with serialized queue**
+
+```
+CLI ──────────────────┐
+Telegram bot ─────────┼──► session manager ──► Claude process (stdin/stdout)
+Phone/voice (later) ──┘         │
+                                 └──► routes response back to originating interface
+```
+
+Each interface submits messages to a shared queue. The session manager processes one message at a time (Claude is inherently single-threaded per session) and routes each response back to the interface that sent it.
+
+**Queue semantics:**
+- Messages tagged with source interface on enqueue
+- Processed strictly in order (FIFO)
+- Response routed back to originating interface only
+- If CLI and Telegram both enqueue before Claude finishes — second waits, gets its response when processed
+
+**Decision: Queue-based concurrency (not lock-based)**
+
+A lock file (`<session_id>.lock`) would prevent collision but doesn't handle the multi-frontend case cleanly. A queue is the right primitive — it serializes access while preserving message ordering and response routing.
+
+**Status:** Design only. Informs Relay v2 implementation.
+
+---
+
+### 2026-03-28 — Architectural Decision: Persistent Claude Process + Sentinel Token for Relay v2
+
+**Context:** Designing next-generation relay architecture to replace the current per-message `--resume` spawn approach.
+
+**Decision: Persistent Claude process per user**
+
+Keep one `claude` CLI process alive per user, communicating via stdin/stdout pipes instead of spawning a new process per message. This eliminates the quadratic token growth problem (see finding below).
+
+```
+Telegram → Bot Agent → stdin pipe → [claude process] → stdout pipe → Bot Agent → Telegram
+```
+
+**Decision: Sentinel token for end-of-response detection**
+
+Claude is instructed via system prompt to always terminate every response with a unique sentinel token. The bot reads stdout until it sees the sentinel, then strips it and sends the response.
+
+Example sentinel: `<<RELAY_END_7f3a>>` (collision-resistant, generated at startup)
+
+Rules:
+- Sentinel must be unique enough to never appear naturally in output (avoid `##END##`, use a UUID-based token)
+- If sentinel never arrives → crash or system prompt failure → restart Claude process, do not silently retry
+- Timeout as fallback — needed during long tool executions (bash, file reads, API calls)
+- On timeout: send partial response with warning rather than dropping entirely
+
+**Why CLI, not API:**
+- Need Claude Code tool access (Read, Edit, Write, Bash, MCP) for files, web search, databases, Google Drive, Jira, etc.
+- Running on Pro subscription (monthly flat rate) — API is per-token billing, not viable
+
+**Architecture sketch:**
+```
+Per-user process manager
+├── user_123: claude process (stdin/stdout pipes, stream-json)
+│     └── message queue (serialize concurrent messages)
+├── user_456: claude process
+└── ...
+
+Bot agent
+├── receives Telegram message
+├── routes to user's process manager
+├── enqueues message → writes to stdin
+├── reads stdout until sentinel (or timeout)
+└── sends response to Telegram
+```
+
+**Status:** Design only. Current relay remains in place until this is built.
+
+---
+
+### 2026-03-28 — Finding: Quadratic Token Growth in --resume Session Replay
+
+**Observation:** The relay's session continuity mechanism (`claude --resume <session_id>`) causes O(N²) token consumption across a conversation.
+
+**Mechanism:**
+- `--resume` loads the full `.jsonl` session transcript into context on every invocation
+- Claude CLI exits after each message; there is no persistent process
+- Each new message pays the token cost of all prior turns
+
+**Consequence:** A token sent in message 1 is loaded into the LLM on every subsequent message. By message N, it has been paid for N times. Total tokens consumed across a conversation of N turns grows quadratically, not linearly.
+
+**Example (500 tokens/turn):**
+- Message 10: 5,000 tokens sent (including 9 prior turns)
+- Message 100: 50,000 tokens sent (including 99 prior turns)
+- Total across 100 messages: ~2.5 million tokens vs ~50k for linear
+
+**Compounding factor:** Supabase semantic context (FACTS + GOALS + top-5 relevant messages) is injected on top of the full session replay — so the prompt is even larger than replay alone.
+
+**Current risk level:** Low for occasional use. Will become expensive and slow under heavy daily use.
+
+**Standard mitigation:** Sliding window (keep last K turns verbatim) + summarization of older turns + semantic search for specific facts. Drop full replay beyond the window.
+
+---
