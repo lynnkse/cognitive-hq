@@ -43,53 +43,71 @@ Consolidate task tracking back into a single `.claude/TODO.md`. Currently the bo
 
 ---
 
-### [ ] Relay v2: persistent Claude process per user + sentinel token protocol
-**Priority:** MEDIUM
+### [ ] Relay v2: implement node graph
+**Priority:** HIGH
 **Created:** 2026-03-28
+**Updated:** 2026-04-02
 
-Replace the current per-message spawn architecture with a persistent Claude CLI process per user communicating via stdin/stdout pipes. See LOG.md 2026-03-28 for full design.
+Full design completed in LOG.md 2026-04-02. Architecture is finalized; ready to implement.
 
-**Architecture: ROS-style node graph (see LOG.md 2026-03-28)**
+**Design reference:** LOG.md 2026-04-02 — Relay v2 Architecture Design Session
 
-Nodes:
-1. **TelegramNode** — grammY subscriber, publishes to `/user_input`
-2. **CLINode** — stdin subscriber, publishes to `/user_input`
-3. **VoiceNode** (later) — phone call stream, publishes to `/user_input`
-4. **SessionManagerNode** — owns persistent Claude process; FIFO queue per user; sentinel protocol; publishes to `/claude_response`
-5. **RouterNode** — routes `/claude_response` back to originating interface by `source` field
-6. **MemoryNode** — async Supabase writes; subscribes to `/user_input` + `/claude_response`; non-blocking
+**Key decisions:**
+- PTY required (not plain pipes) — Claude CLI checks for TTY. Use `pty.openpty()` master/slave pair.
+- All nodes 24/7 in tmux. Persistent Claude process stays alive for weeks.
+- Single user (Lynn) for v1. Multi-user generalized later.
+- MemoryNode in-process with SessionManagerNode.
+- ProactiveNode: cron scheduler + HTTP endpoint for external pushes (Slack, email, etc.)
 
-Message schema on `/user_input`: `{text, source, user_id, media_path?}`
-Message schema on `/claude_response`: `{text, source, user_id}`
+**Sockets:**
+```
+/tmp/cognitive-hq/
+├── user_input.sock       — frontends → SessionManager, NDJSON {text, source, user_id, media_path?}
+├── claude_response.sock  — SessionManager → RouterNode, NDJSON {text, source, user_id}
+└── display.sock          — SessionManager → CLINode, raw PTY bytes
+```
 
-Sentinel: system prompt requires `<<RELAY_END_<uuid>>>` at end of every response. Missing sentinel = crash/error → restart Claude process.
+**Open issues (see LOG.md 2026-04-02 for full list):**
+- [ ] #1: Sentinel injection — `--system-prompt` flag or CLAUDE.md? (test flag first)
+- [ ] #2: CLINode input mode — line-buffered first, raw mode later
+- [ ] #6: Unattended permission timeout — deferred to phase 2
+- [ ] #9: ProactiveNode HTTP endpoint — local or externally reachable?
+- [ ] #11: Which MCPs to configure first? (Supabase recommended)
 
-Implementation: node graph is the pattern, not the runtime. Start with in-process event emitter; upgrade to Redis pub/sub if multi-process needed.
+**Implementation sub-tasks:**
 
-**Multi-frontend requirement:** CLI and Telegram used simultaneously. CLI for code/files; Telegram for voice, images, mobile. Phone/voice call planned.
+- [ ] **Phase 1: SessionManagerNode + CLINode**
+  - `claude-telegram-relay/relay_v2/session_manager.py`
+  - `claude-telegram-relay/relay_v2/cli_node.py`
+  - Goal: working terminal session through manager, identical UX to direct claude
+  - Test sentinel injection via `--system-prompt` flag (resolves open issue #1)
 
-**Open issues before full implementation:**
-- [ ] #2: Sentinel injection — who injects `<<RELAY_END_<uuid>>>` and when
-- [ ] #3: Unattended permission policy — what happens if PermissionRequest gets no response
-- [ ] #4: Multi-user process registry design
-- [ ] #5: PermissionRequest bus flow — dedicated sockets, request_id correlation
+- [ ] **Phase 2: MemoryNode**
+  - `claude-telegram-relay/relay_v2/memory_node.py`
+  - Input enrichment: prepend FACTS + GOALS + semantic matches before queue
+  - Output processing: extract [REMEMBER]/[GOAL]/[DONE] tags, write to Supabase
+  - Port from `claude-telegram-relay/src/memory.ts`
 
-**First artifact:** `claude-telegram-relay/tools/pipe_session.py` — proof of concept, spawns Claude with pipes, multiplexes keyboard↔Claude.
+- [ ] **Phase 3: RouterNode + TelegramNode**
+  - `claude-telegram-relay/relay_v2/router_node.py`
+  - `claude-telegram-relay/relay_v2/telegram_node.py`
+  - Port media handling (images, docs, voice) from relay.ts
+  - Typing indicator keepalive (every 4s)
+  - Telegram 4096 char split
+  - File cleanup after response delivered
 
-**[ ] Test pipe_session.py**
-- Close this session
-- Run: `python3 claude-telegram-relay/tools/pipe_session.py --resume <session_id>`
-- Find session ID: `ls -t ~/.claude/projects/-home-lynnkse-cognitive-hq/*.jsonl | head -1`
-- Verify: terminal experience identical to running `claude` directly
-- Watch for: garbled colors, missing readline, buffering issues → if any, switch to `pty`
-- Report findings back to LOG.md
+- [ ] **Phase 4: ProactiveNode**
+  - `claude-telegram-relay/relay_v2/proactive_node.py`
+  - Cron scheduler with configurable jobs
+  - HTTP endpoint for external event pushes
 
-**Reference:** LOG.md 2026-03-28/29 — full reading order in Session Continuity Note
+**[x] Test pipe_session.py**
+- **Completed:** 2026-04-02
+- **Outcome:** Works. PTY required (not plain pipes) — Claude detects non-TTY stdin and enters print mode. `pty.spawn()` allocates `/dev/pts/8`, Claude runs fully interactively. Current session is running through it.
+- **Implication:** SessionManagerNode must use `pty.openpty()` master/slave pair.
 
 **Supersedes:**
-- `[ ] Fix quadratic token growth` (below) — that task becomes redundant if this is built
-
-**Reference:** LOG.md 2026-03-28 — Architectural Decision: Persistent Claude Process + Sentinel Token
+- `[ ] Fix quadratic token growth` — redundant once v2 built
 
 ---
 

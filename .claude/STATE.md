@@ -144,6 +144,22 @@ Also created:
 
 ---
 
+## Current State (2026-04-02)
+
+**Branch:** master
+
+**Active direction:** Relay v2 implementation — full architecture designed, ready to code.
+
+**Current session:** Running through `claude-telegram-relay/tools/pipe_session.py` (PTY wrapper). Confirms PTY approach works.
+
+**Relay v1 status:** Running in background. Still the active bot.
+
+**Relay v2 status:** Architecture finalized (LOG.md 2026-04-02). No code written yet. Implementation starts with SessionManagerNode + CLINode.
+
+**First implementation target:** `claude-telegram-relay/relay_v2/session_manager.py` + `cli_node.py`
+
+---
+
 ## Current State (2026-02-14)
 
 **Branch:** master

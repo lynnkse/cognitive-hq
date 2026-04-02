@@ -1350,3 +1350,157 @@ Bot agent
 **Standard mitigation:** Sliding window (keep last K turns verbatim) + summarization of older turns + semantic search for specific facts. Drop full replay beyond the window.
 
 ---
+
+### 2026-04-02 — Relay v2 Architecture Design Session
+
+**Context:** Full design session for relay v2. Covers SessionManagerNode, CLINode, ProactiveNode, MCP strategy, and v1 code review findings.
+
+---
+
+#### SessionManagerNode Design
+
+Owns the persistent Claude process. All other nodes are clients.
+
+**PTY mechanics:**
+```python
+master_fd, slave_fd = pty.openpty()
+proc = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd)
+os.close(slave_fd)
+# read/write master_fd
+```
+
+**Thread layout:**
+- **PTY reader thread** — reads `master_fd`, forwards raw bytes to display.sock (CLINode), accumulates response buffer, detects sentinel → strips it, signals IDLE, publishes to `claude_response.sock`
+- **Queue processor thread** — state machine (IDLE/GENERATING). IDLE: dequeue next message, write to `master_fd` → GENERATING. GENERATING: blocks on `threading.Event` until reader signals sentinel found.
+- **Socket listener thread** — accepts NDJSON on `user_input.sock`, enqueues with `(source, user_id, text, media_path?)`
+- **Display server thread** — accepts single CLINode connection on `display.sock`, streams raw PTY bytes
+
+**State machine:**
+```
+IDLE → (dequeue + write to master_fd) → GENERATING → (sentinel found) → IDLE
+```
+
+**Session ID tracking:** After spawn, find newest `.jsonl` in `~/.claude/projects/-home-lynnkse-cognitive-hq/`. Store in `~/.claude-relay/session_id`. Pass `--resume` on crash restart.
+
+**PTY size:** CLINode sends terminal size on connect. SessionManager calls `ioctl(master_fd, TIOCSWINSZ, ...)`. CLINode forwards `SIGWINCH`.
+
+---
+
+#### CLINode Design
+
+Dead simple — two threads:
+- **Display thread** — connect to `display.sock`, read raw bytes, write to `sys.stdout`
+- **Input thread** — read lines from `sys.stdin`, send NDJSON to `user_input.sock`
+
+CLINode is ~50 lines. All complexity in SessionManagerNode.
+
+---
+
+#### Socket Protocol
+
+```
+/tmp/cognitive-hq/
+├── user_input.sock       — frontends → SessionManager, NDJSON: {text, source, user_id, media_path?}
+├── claude_response.sock  — SessionManager → RouterNode, NDJSON: {text, source, user_id}
+└── display.sock          — SessionManager → CLINode, raw PTY bytes (streaming)
+```
+
+**ANSI handling:** display.sock carries raw bytes including ANSI (CLINode displays as-is). `claude_response.sock` carries ANSI-stripped clean text (for Telegram). Sentinel stripped from both.
+
+---
+
+#### ProactiveNode Design
+
+Two trigger mechanisms:
+1. **Cron scheduler** — fires on schedule, injects prompt into `user_input.sock` with `source: "proactive"`
+2. **Event queue** — HTTP endpoint accepts POSTs from external systems (Slack, email, webhooks), wraps as NDJSON and sends to `user_input.sock`
+
+RouterNode routes responses with `source: "proactive"` → Telegram always (user may not be at terminal).
+
+Claude decides whether to respond or stay silent ("stay silent if nothing needs attention").
+
+All nodes assumed 24/7 in tmux sessions. Persistent Claude process stays alive for weeks like current Claude Code sessions.
+
+---
+
+#### Memory Architecture (v2 vs v1)
+
+**v1 pattern (kept for v2):**
+- Output tags: `[REMEMBER: fact]`, `[GOAL: text | DEADLINE: date]`, `[DONE: search text]`
+- MemoryNode extracts tags from `claude_response.sock`, writes to Supabase, strips from display
+- Per-message input enrichment: prepend FACTS + GOALS + top-5 semantic matches before message enters queue
+
+**v2 change:** enrichment happens in MemoryNode as preprocessing before SessionManagerNode queue, not in TelegramNode. All frontends benefit.
+
+**MCP path:** No MCPs configured currently. Once Supabase MCP is configured, Claude can store/retrieve memories directly — tag system becomes fallback. RouterNode still strips tags regardless.
+
+---
+
+#### V1 Code Review Findings (relay.ts, memory.ts, transcribe.ts)
+
+Key things v1 does that v2 must account for:
+
+1. **Media handling** — images and documents downloaded to disk, path injected into message text (`[Image: /path]`, `[File: /path]`). Voice transcribed via Groq/whisper before entering queue. Cleanup after Claude responds — responsibility needs assigning (TelegramNode owns the file, so TelegramNode cleans up after `claude_response.sock` delivers).
+
+2. **Typing indicator keepalive** — Telegram typing indicator expires after ~5s. TelegramNode must send `replyWithChatAction("typing")` every 4s while waiting for response from `claude_response.sock`.
+
+3. **Profile + persona** — v1 injects `config/profile.md` + current time + user name into every prompt via `buildPrompt()`. In v2 with persistent process, profile belongs in system prompt at spawn time. Only current time and memory context need per-message injection.
+
+4. **Telegram 4096 char limit** — split at natural boundaries (paragraph → line → word). RouterNode handles this.
+
+5. **Session ID from JSON output** — v1 uses `--output-format json` to get `session_id` from Claude. Not available in interactive mode. V2 uses filesystem approach (already in v1 as `findLatestSession()`).
+
+6. **Lock file** — v1 prevents multiple instances. SessionManagerNode should do the same.
+
+---
+
+#### Open Questions (full list as of 2026-04-02)
+
+| # | Question | Status |
+|---|----------|--------|
+| 1 | Sentinel injection — `--system-prompt` flag or CLAUDE.md? | Needs testing |
+| 2 | CLINode input mode — line-buffered or raw? | Proposed: line-buffered first |
+| 3 | display.sock — one CLINode at a time or multiple? | Proposed: one at a time |
+| 4 | File location — `relay_v2/` dir? | Proposed: `claude-telegram-relay/relay_v2/` |
+| 5 | MemoryNode in-process or separate? | **Decided: in-process** |
+| 6 | Unattended permission timeout policy | Deferred to phase 2 |
+| 7 | Multi-user now or single user first? | **Decided: single user first** |
+| 8 | Proactive messages — always-on or lightweight spawner? | **Decided: always-on, 24/7 assumption** |
+| 9 | ProactiveNode HTTP endpoint — local only or externally reachable? | Open |
+| 10 | Proactive silence — prompt instruction or pre-check? | Open |
+| 11 | Which MCPs to configure first? | Proposed: Supabase first |
+| 12 | Media cleanup — who deletes downloaded files after Claude responds? | Proposed: TelegramNode |
+| 13 | Profile injection — CLAUDE.md or `--system-prompt` at spawn? | Depends on Q1 |
+| 14 | Typing indicator keepalive — TelegramNode sends every 4s while waiting? | Proposed: yes |
+
+---
+
+#### Implementation Order
+
+1. `session_manager.py` + `cli_node.py` — working terminal session through manager
+2. `memory_node.py` — input enrichment + output tag extraction
+3. `router_node.py` + TelegramNode integration (port from relay.ts)
+4. `proactive_node.py` — cron + HTTP endpoint
+
+---
+
+### 2026-04-02 — Finding: PTY Required (Not Plain Pipes); pipe_session.py Working
+
+**Result:** pipe_session.py works. This session is running through it.
+
+**Key finding:** Claude CLI requires a real TTY. When stdin is a plain pipe, Claude detects it's not a terminal and enters `--print` mode (non-interactive). `pty.spawn()` solves this by providing a real PTY.
+
+**Implication for SessionManagerNode:** Must use `pty.openpty()` master/slave pair, not `subprocess.Popen(stdin=PIPE, stdout=PIPE)`.
+
+**Path forward (already documented in pipe_session.py):**
+```python
+master_fd, slave_fd = pty.openpty()
+proc = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd)
+os.close(slave_fd)
+# read/write master_fd to multiplex programmatic + keyboard I/O
+```
+`master_fd` is bidirectional — write to send input to Claude, read to receive Claude's output.
+
+**Status:** Unblocks SessionManagerNode implementation.
+
+---

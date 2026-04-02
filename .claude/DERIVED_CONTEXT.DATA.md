@@ -67,7 +67,69 @@ Build a personal command center that supports:
 
 ---
 
-## Current Phase: Fully Functional Telegram Bot with Memory & Voice
+## Current Phase: Relay v2 Implementation (Architecture Complete)
+
+**Status:** Relay v1 running. Relay v2 fully designed, implementation starting.
+
+**This session runs through:** `claude-telegram-relay/tools/pipe_session.py` (PTY wrapper, PID chain: pipe_session.py → /dev/pts/8 → claude)
+
+---
+
+### Relay v2 Architecture
+
+**Core insight:** SessionManagerNode owns the persistent Claude process. All frontends are clients that connect via sockets.
+
+**Node graph:**
+```
+TelegramNode ──┐
+CLINode ────────┤──► user_input.sock ──► SessionManagerNode ──► Claude (PTY)
+ProactiveNode ─┘         ↑                      │
+  ├── cron scheduler      │              claude_response.sock
+  └── HTTP endpoint ──────┘                      │
+       (Slack, email,                       RouterNode
+        webhooks)                    ┌──────────┴──────────┐
+                                Telegram              CLINode
+                              (always for           display.sock
+                               proactive)           (raw PTY bytes)
+                                  │
+                              MemoryNode (in-process)
+                            ├── input enrichment (FACTS+GOALS+semantic)
+                            └── output tag extraction ([REMEMBER]/[GOAL]/[DONE])
+```
+
+**Sockets:**
+```
+/tmp/cognitive-hq/
+├── user_input.sock       NDJSON: {text, source, user_id, media_path?}
+├── claude_response.sock  NDJSON: {text, source, user_id}  (ANSI-stripped)
+└── display.sock          raw PTY bytes stream → CLINode stdout
+```
+
+**SessionManagerNode threads:**
+1. PTY reader — reads master_fd, forwards raw to display.sock, detects sentinel
+2. Queue processor — IDLE/GENERATING state machine, writes to master_fd
+3. Socket listener — accepts user_input.sock connections, enqueues messages
+4. Display server — holds CLINode display.sock connection
+
+**Sentinel:** `<<RELAY_END_<uuid>>>` in system prompt. Marks end of every response. Missing sentinel = crash → restart with `--resume`.
+
+**PTY:** `pty.openpty()` master/slave pair. Claude sees `/dev/pts/X` (real TTY). Required — Claude enters print mode with plain pipes.
+
+**Session ID:** Find newest `.jsonl` in `~/.claude/projects/-home-lynnkse-cognitive-hq/` after spawn. Store in `~/.claude-relay/session_id`. Pass `--resume` on restart.
+
+**Implementation order:**
+1. `relay_v2/session_manager.py` + `relay_v2/cli_node.py`
+2. `relay_v2/memory_node.py`
+3. `relay_v2/router_node.py` + `relay_v2/telegram_node.py`
+4. `relay_v2/proactive_node.py`
+
+**Open questions:** See LOG.md 2026-04-02, questions #1–14.
+
+**MCPs:** None configured. Once Supabase MCP set up, Claude stores memories directly — tag system becomes fallback.
+
+---
+
+## Previous Phase: Fully Functional Telegram Bot with Memory & Voice
 
 **Status:** Bot deployed with all core features operational. Persistent memory via Supabase, semantic search via pgvector, voice transcription via Groq.
 
