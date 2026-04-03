@@ -31,5 +31,6 @@ config/settings.local.yaml
 # OS
 .DS_Store
 
-# External repos (cloned dependencies)
-claude-telegram-relay/
+# External repos (cloned dependencies) — ignore everything except our relay_v2/
+claude-telegram-relay/*
+!claude-telegram-relay/relay_v2/
