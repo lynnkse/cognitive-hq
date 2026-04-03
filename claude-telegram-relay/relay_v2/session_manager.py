@@ -133,8 +133,12 @@ class SessionManagerNode:
         except Exception:
             return None
 
-    def _find_newest_session(self) -> Optional[str]:
-        """Find the most recently modified session file for this project."""
+    def _find_newest_session(self, not_before: float) -> Optional[str]:
+        """
+        Find a session file created after `not_before` (epoch seconds).
+        Only accepts files newer than that timestamp so we don't accidentally
+        pick up a currently-running session.
+        """
         project_name = config.PROJECT_DIR.replace("/", "-")
         sessions_dir = Path.home() / ".claude" / "projects" / project_name
         files = sorted(
@@ -142,8 +146,9 @@ class SessionManagerNode:
             key=lambda f: f.stat().st_mtime,
             reverse=True,
         )
-        if files:
-            return files[0].stem
+        for f in files:
+            if f.stat().st_mtime > not_before:
+                return f.stem
         return None
 
     def _save_session_id(self, session_id: str):
@@ -151,14 +156,16 @@ class SessionManagerNode:
         Path(config.SESSION_ID_FILE).write_text(session_id)
         log.info(f"Session ID saved: {session_id[:8]}...")
 
-    def _capture_new_session_id(self):
-        """Called 5s after spawning a new (non-resumed) session."""
-        time.sleep(5)
-        session_id = self._find_newest_session()
-        if session_id:
-            self._save_session_id(session_id)
-        else:
-            log.warning("Could not capture new session ID")
+    def _capture_new_session_id(self, spawn_time: float):
+        """Poll for a new session file created after spawn_time."""
+        deadline = spawn_time + 30  # give Claude up to 30s to create the file
+        while time.time() < deadline:
+            time.sleep(2)
+            session_id = self._find_newest_session(not_before=spawn_time)
+            if session_id:
+                self._save_session_id(session_id)
+                return
+        log.warning("Could not capture new session ID within 30s")
 
     # ------------------------------------------------------------------
     # Claude process lifecycle
@@ -168,21 +175,24 @@ class SessionManagerNode:
         cmd = [config.CLAUDE_PATH]
 
         existing_session = self._get_saved_session_id()
+        spawn_time = time.time()
         if existing_session:
             cmd += ["--resume", existing_session]
             log.info(f"Resuming session: {existing_session[:8]}...")
         else:
             log.info("Starting new session")
-            threading.Thread(target=self._capture_new_session_id, daemon=True).start()
+            threading.Thread(
+                target=self._capture_new_session_id,
+                args=(spawn_time,),
+                daemon=True,
+            ).start()
 
         cmd += ["--append-system-prompt", self._build_system_prompt()]
 
-        # Get current terminal size for PTY
-        try:
-            size = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\x00" * 8)
-            rows, cols = struct.unpack("HHHH", size)[:2]
-        except Exception:
-            rows, cols = 24, 80
+        # Use a generous default PTY size. CLINode will send its actual
+        # terminal size via resize message shortly after connecting,
+        # which will correct this dynamically.
+        rows, cols = 50, 220
 
         master_fd, slave_fd = pty.openpty()
         self._set_pty_size(master_fd, rows, cols)
