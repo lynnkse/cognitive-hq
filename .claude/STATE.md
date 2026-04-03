@@ -148,13 +148,14 @@ Also created:
 
 **Branch:** master
 
-**Active direction:** Relay v2 implementation — all design decisions finalized, coding starts now.
-
-**Current session:** Running through `claude-telegram-relay/tools/pipe_session.py` (PTY wrapper).
+**Active direction:** Relay v2 — Phase 1 complete, Phase 2 (MemoryNode) next.
 
 **Relay v1 status:** Running in background. Still the active bot.
 
-**Relay v2 status:** All 15 open questions resolved (LOG.md 2026-04-03). No code written yet.
+**Relay v2 status:** Phase 1 working and verified (LOG.md 2026-04-03).
+- `relay_v2/session_manager.py` + `relay_v2/cli_node.py` + `relay_v2/config.py` committed
+- CLINode proxy confirmed transparent — identical UX to direct `claude`
+- Next: `relay_v2/memory_node.py` — input enrichment + Supabase tag extraction
 
 **First implementation target:** `claude-telegram-relay/relay_v2/session_manager.py` + `cli_node.py`
 

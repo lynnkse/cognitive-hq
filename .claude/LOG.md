@@ -1351,6 +1351,28 @@ Bot agent
 
 ---
 
+### 2026-04-03 — Phase 1 Working: SessionManagerNode + CLINode Verified
+
+**Result:** Full end-to-end test passed. CLINode connects to SessionManagerNode, Claude Code renders correctly, session is fully functional through the proxy.
+
+**Test performed:**
+- Pane 1: `python3 claude-telegram-relay/relay_v2/session_manager.py`
+- Pane 2: `python3 claude-telegram-relay/relay_v2/cli_node.py`
+- Typed `read BOOTSTRAP.md and proceed` — Claude reconstructed full context from files and responded correctly
+- Ran `/stats`, `/usage`, `describe what we worked on lately` — all worked correctly
+- Terminal rendering: correct (Claude Code TUI rendered with proper dimensions)
+
+**Bugs found and fixed during testing:**
+1. `_find_newest_session` picked up the currently-running session (no time filter) → fixed with `not_before=spawn_time` filter, polling every 2s up to 30s
+2. PTY size mismatch (50x220 default was too wide for actual terminal) → fixed with 80x24 default + SIGWINCH sent to Claude process on every resize
+3. `signal` module name collision with shutdown handler → renamed import to `signal_module`
+
+**Key confirmation:** The CLINode proxy is transparent — experience identical to running `claude` directly. The node graph is working.
+
+**Commits:** cb34ecb (Phase 1), 1946613 (session ID fix), b32f36c (PTY rendering fix)
+
+---
+
 ### 2026-04-03 — Relay v2 Open Questions Resolved
 
 All 15 open questions closed. Ready to implement.

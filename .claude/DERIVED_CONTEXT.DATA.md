@@ -118,8 +118,8 @@ ProactiveNode ─┘         ↑                      │
 **Session ID:** Find newest `.jsonl` in `~/.claude/projects/-home-lynnkse-cognitive-hq/` after spawn. Store in `~/.claude-relay/session_id`. Pass `--resume` on restart.
 
 **Implementation order:**
-1. `relay_v2/session_manager.py` + `relay_v2/cli_node.py`
-2. `relay_v2/memory_node.py`
+1. ✅ `relay_v2/session_manager.py` + `relay_v2/cli_node.py` — DONE, verified 2026-04-03
+2. `relay_v2/memory_node.py` — NEXT
 3. `relay_v2/router_node.py` + `relay_v2/telegram_node.py`
 4. `relay_v2/proactive_node.py`
 

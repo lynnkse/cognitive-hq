@@ -71,11 +71,11 @@ Full design completed in LOG.md 2026-04-02. Architecture is finalized; ready to 
 
 **Implementation sub-tasks:**
 
-- [ ] **Phase 1: SessionManagerNode + CLINode**
+- [x] **Phase 1: SessionManagerNode + CLINode** ✓ 2026-04-03
   - `claude-telegram-relay/relay_v2/session_manager.py`
   - `claude-telegram-relay/relay_v2/cli_node.py`
-  - Goal: working terminal session through manager, identical UX to direct claude
-  - Test sentinel injection via `--system-prompt` flag (resolves open issue #1)
+  - Verified: terminal experience identical to direct `claude`. Proxy is transparent.
+  - Bugs fixed: session ID capture, PTY size, SIGWINCH, signal name collision
 
 - [ ] **Phase 2: MemoryNode**
   - `claude-telegram-relay/relay_v2/memory_node.py`
