@@ -1351,6 +1351,36 @@ Bot agent
 
 ---
 
+### 2026-04-03 — Relay v2 Open Questions Resolved
+
+All 15 open questions closed. Ready to implement.
+
+| # | Question | Decision |
+|---|----------|----------|
+| 1 | Sentinel injection | `--append-system-prompt` at spawn (flag confirmed exists) |
+| 2 | CLINode input mode | Raw mode — feel identical to direct claude session |
+| 3 | display.sock | One CLINode at a time |
+| 4 | File location | `claude-telegram-relay/relay_v2/` |
+| 5 | MemoryNode | In-process with SessionManagerNode |
+| 6 | Unattended permissions | Deferred to phase 2 |
+| 7 | Multi-user | Single user first |
+| 8 | Proactive always-on | Yes, 24/7 in tmux |
+| 9 | ProactiveNode HTTP | Local only (`localhost:PORT`); public IP option later |
+| 10 | Proactive silence | Prompt instruction ("stay silent if nothing needs attention") |
+| 11 | MCPs | Supabase first, rest added gradually |
+| 12 | Media cleanup | TelegramNode owns downloaded files, cleans up after response delivered |
+| 13 | Profile injection | `--append-system-prompt` at spawn (same as sentinel) |
+| 14 | Typing keepalive | TelegramNode sends every 4s while waiting for response |
+| 15 | Config location | Reuse `claude-telegram-relay/.env`; revisit if multi-agent needed |
+
+**Note on Q2 (raw mode):** CLINode puts its own stdin into raw mode and forwards every byte to SessionManagerNode → Claude's PTY. Indistinguishable from running `claude` directly.
+
+**Note on Q11 (Supabase MCP):** Configure as a separate task before or alongside Phase 2 (MemoryNode). Once active, Claude stores/retrieves memories directly — tag system becomes fallback.
+
+**Note on Q15 (multi-agent):** If two agents need to run simultaneously on the same machine in future, config split and socket namespace separation will be needed. Deferred.
+
+---
+
 ### 2026-04-02 — Relay v2 Architecture Design Session
 
 **Context:** Full design session for relay v2. Covers SessionManagerNode, CLINode, ProactiveNode, MCP strategy, and v1 code review findings.

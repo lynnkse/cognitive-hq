@@ -67,12 +67,7 @@ Full design completed in LOG.md 2026-04-02. Architecture is finalized; ready to 
 └── display.sock          — SessionManager → CLINode, raw PTY bytes
 ```
 
-**Open issues (see LOG.md 2026-04-02 for full list):**
-- [ ] #1: Sentinel injection — `--system-prompt` flag or CLAUDE.md? (test flag first)
-- [ ] #2: CLINode input mode — line-buffered first, raw mode later
-- [ ] #6: Unattended permission timeout — deferred to phase 2
-- [ ] #9: ProactiveNode HTTP endpoint — local or externally reachable?
-- [ ] #11: Which MCPs to configure first? (Supabase recommended)
+**All open questions resolved** — see LOG.md 2026-04-03. Ready to implement.
 
 **Implementation sub-tasks:**
 
