@@ -27,7 +27,7 @@ import struct
 import socket
 import threading
 import queue
-import signal
+import signal as signal_module
 import glob
 import uuid
 import re
@@ -189,10 +189,10 @@ class SessionManagerNode:
 
         cmd += ["--append-system-prompt", self._build_system_prompt()]
 
-        # Use a generous default PTY size. CLINode will send its actual
-        # terminal size via resize message shortly after connecting,
-        # which will correct this dynamically.
-        rows, cols = 50, 220
+        # Use a safe standard default. CLINode sends its actual terminal
+        # size immediately after connecting and we send SIGWINCH to Claude
+        # so it redraws at the correct dimensions.
+        rows, cols = 24, 80
 
         master_fd, slave_fd = pty.openpty()
         self._set_pty_size(master_fd, rows, cols)
@@ -222,6 +222,12 @@ class SessionManagerNode:
                         struct.pack("HHHH", rows, cols, 0, 0))
         except Exception:
             pass
+        # Notify Claude process so it redraws its TUI at the new dimensions
+        if self.claude_proc and self.claude_proc.poll() is None:
+            try:
+                os.kill(self.claude_proc.pid, signal_module.SIGWINCH)
+            except Exception:
+                pass
 
     def _handle_claude_exit(self):
         log.warning("Claude process exited — restarting in 2s...")
@@ -607,8 +613,8 @@ class SessionManagerNode:
         for t in threads:
             t.start()
 
-        signal.signal(signal.SIGINT, self._shutdown)
-        signal.signal(signal.SIGTERM, self._shutdown)
+        signal_module.signal(signal_module.SIGINT, self._shutdown)
+        signal_module.signal(signal_module.SIGTERM, self._shutdown)
 
         log.info("SessionManagerNode running — press Ctrl+C to stop")
 
