@@ -58,3 +58,4 @@ CLI_INPUT_SOCK: str = f"{SOCKET_DIR}/cli_input.sock"
 RELAY_DIR: str = get("RELAY_DIR", str(Path.home() / ".claude-relay"))
 SESSION_ID_FILE: str = f"{RELAY_DIR}/session_id"
 LOCK_FILE: str = f"{RELAY_DIR}/session_manager.lock"
+SENTINEL_FILE: str = f"{RELAY_DIR}/sentinel"

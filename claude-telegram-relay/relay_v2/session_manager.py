@@ -15,7 +15,13 @@ State machine (queue processor):
   IDLE:       keyboard bytes flow freely to Claude's PTY.
               Dequeues next item when available → GENERATING.
   GENERATING: keyboard bytes buffered (not forwarded).
-              Waits for sentinel in PTY output → publishes response → IDLE.
+              Polls session JSONL for new assistant entry → publishes → IDLE.
+
+Response detection strategy:
+  Claude's interactive TUI does NOT echo all response text to the PTY (it
+  suppresses control tokens like sentinels). Instead, we watch the session
+  JSONL file which always contains the complete, clean response text once
+  a turn is finished. No sentinel needed.
 """
 
 import os
@@ -28,9 +34,6 @@ import socket
 import threading
 import queue
 import signal as signal_module
-import glob
-import uuid
-import re
 import json
 import logging
 import subprocess
@@ -48,8 +51,10 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ANSI escape sequence pattern for stripping from Telegram responses
-_ANSI_RE = re.compile(rb"\x1b\[[0-9;]*[mGKHFABCDsuJrHf]|\x1b[=>]|\x1b\[\?[0-9;]*[hl]")
+# How long to wait for Claude's response before giving up (seconds)
+_RESPONSE_TIMEOUT = 180
+# How often to poll the session JSONL (seconds)
+_POLL_INTERVAL = 0.5
 
 
 @dataclass
@@ -63,14 +68,9 @@ class QueueItem:
 class SessionManagerNode:
 
     def __init__(self):
-        self.sentinel = f"<<RELAY_END_{uuid.uuid4().hex[:8]}>>"
-        self.sentinel_bytes = self.sentinel.encode()
-
         self.input_queue: queue.Queue[Optional[QueueItem]] = queue.Queue()
         self.state = "IDLE"           # IDLE | GENERATING
         self.current_item: Optional[QueueItem] = None
-        self.response_buffer: list[bytes] = []
-        self.response_ready = threading.Event()
 
         # Keyboard bytes buffered while GENERATING
         self.keyboard_buffer: list[bytes] = []
@@ -88,6 +88,11 @@ class SessionManagerNode:
         self.response_subscribers: list[socket.socket] = []
         self.response_subs_lock = threading.Lock()
 
+        # Tracked after Claude spawns so JSONL watcher knows where to look
+        self.current_session_id: Optional[str] = None
+        # Epoch time of most recent Claude spawn — used to filter session files
+        self._spawn_time: float = 0.0
+
         self._running = True
         self._reader_thread: Optional[threading.Thread] = None
 
@@ -103,11 +108,7 @@ class SessionManagerNode:
 
     def _build_system_prompt(self) -> str:
         profile = self._load_profile()
-        parts = [
-            f"You are operating inside a relay system. "
-            f"You MUST end every single response with this exact token on its own line: {self.sentinel}",
-            "Do not explain the token. Do not omit it. It is required for message routing.",
-        ]
+        parts = []
         if config.USER_NAME:
             parts.append(f"You are speaking with {config.USER_NAME}.")
         if config.USER_TIMEZONE:
@@ -134,11 +135,6 @@ class SessionManagerNode:
             return None
 
     def _find_newest_session(self, not_before: float) -> Optional[str]:
-        """
-        Find a session file created after `not_before` (epoch seconds).
-        Only accepts files newer than that timestamp so we don't accidentally
-        pick up a currently-running session.
-        """
         project_name = config.PROJECT_DIR.replace("/", "-")
         sessions_dir = Path.home() / ".claude" / "projects" / project_name
         files = sorted(
@@ -157,15 +153,21 @@ class SessionManagerNode:
         log.info(f"Session ID saved: {session_id[:8]}...")
 
     def _capture_new_session_id(self, spawn_time: float):
-        """Poll for a new session file created after spawn_time."""
-        deadline = spawn_time + 30  # give Claude up to 30s to create the file
+        deadline = spawn_time + 30
         while time.time() < deadline:
             time.sleep(2)
             session_id = self._find_newest_session(not_before=spawn_time)
             if session_id:
                 self._save_session_id(session_id)
+                self.current_session_id = session_id
+                log.info(f"New session captured: {session_id[:8]}...")
                 return
         log.warning("Could not capture new session ID within 30s")
+
+    def _get_session_file_path(self, session_id: str) -> Path:
+        project_name = config.PROJECT_DIR.replace("/", "-")
+        sessions_dir = Path.home() / ".claude" / "projects" / project_name
+        return sessions_dir / f"{session_id}.jsonl"
 
     # ------------------------------------------------------------------
     # Claude process lifecycle
@@ -175,29 +177,22 @@ class SessionManagerNode:
         cmd = [config.CLAUDE_PATH]
 
         existing_session = self._get_saved_session_id()
-        spawn_time = time.time()
+        self._spawn_time = time.time()
         if existing_session:
             cmd += ["--resume", existing_session]
+            self.current_session_id = existing_session
             log.info(f"Resuming session: {existing_session[:8]}...")
         else:
-            log.info("Starting new session")
-            threading.Thread(
-                target=self._capture_new_session_id,
-                args=(spawn_time,),
-                daemon=True,
-            ).start()
+            log.info("Starting new session (ID captured on first response)")
 
-        cmd += ["--append-system-prompt", self._build_system_prompt()]
+        system_prompt = self._build_system_prompt()
+        if system_prompt.strip():
+            cmd += ["--append-system-prompt", system_prompt]
 
-        # Use a safe standard default. CLINode sends its actual terminal
-        # size immediately after connecting and we send SIGWINCH to Claude
-        # so it redraws at the correct dimensions.
         rows, cols = 24, 80
-
         master_fd, slave_fd = pty.openpty()
         self._set_pty_size(master_fd, rows, cols)
 
-        # Strip CLAUDECODE to allow nested Claude session
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
         proc = subprocess.Popen(
@@ -222,7 +217,6 @@ class SessionManagerNode:
                         struct.pack("HHHH", rows, cols, 0, 0))
         except Exception:
             pass
-        # Notify Claude process so it redraws its TUI at the new dimensions
         if self.claude_proc and self.claude_proc.poll() is None:
             try:
                 os.kill(self.claude_proc.pid, signal_module.SIGWINCH)
@@ -233,6 +227,7 @@ class SessionManagerNode:
         log.warning("Claude process exited — restarting in 2s...")
         time.sleep(2)
         if self._running:
+            self.current_session_id = None  # will be re-captured or resumed
             self._spawn_claude()
             self._reader_thread = threading.Thread(
                 target=self._pty_reader_thread, daemon=True
@@ -240,52 +235,22 @@ class SessionManagerNode:
             self._reader_thread.start()
 
     # ------------------------------------------------------------------
-    # PTY reader thread
+    # PTY reader thread — display only, no response detection
     # ------------------------------------------------------------------
 
     def _pty_reader_thread(self):
         """
-        Reads Claude's PTY output continuously.
-        - Forwards raw bytes to CLINode display, stripping the sentinel.
-        - Accumulates response buffer.
-        - Signals response_ready when sentinel found.
+        Reads Claude's PTY output and forwards raw bytes to CLINode display.
+        Response detection is done via JSONL polling, not PTY scanning.
         """
-        holdback = b""
-        sentinel_len = len(self.sentinel_bytes)
-
         while self._running:
             try:
                 chunk = os.read(self.master_fd, 4096)
             except OSError:
                 break
-
             if not chunk:
                 break
-
-            data = holdback + chunk
-
-            idx = data.find(self.sentinel_bytes)
-            if idx != -1:
-                # Forward everything before the sentinel
-                before = data[:idx]
-                if before:
-                    self._forward_display(before)
-                    self.response_buffer.append(before)
-
-                # Signal response complete
-                self.response_ready.set()
-
-                # Remainder after sentinel becomes next holdback
-                holdback = data[idx + sentinel_len:]
-            else:
-                # No sentinel yet — forward all but the last (sentinel_len-1) bytes
-                # to avoid splitting the sentinel across reads
-                safe = max(0, len(data) - (sentinel_len - 1))
-                if safe > 0:
-                    safe_bytes = data[:safe]
-                    self._forward_display(safe_bytes)
-                    self.response_buffer.append(safe_bytes)
-                holdback = data[safe:]
+            self._forward_display(chunk)
 
         log.warning("PTY reader exiting")
         self._handle_claude_exit()
@@ -299,14 +264,115 @@ class SessionManagerNode:
                     self.display_client = None
 
     # ------------------------------------------------------------------
+    # JSONL response detection
+    # ------------------------------------------------------------------
+
+    def _read_new_assistant_entry(self, session_file: Path, offset: int) -> Optional[str]:
+        """Read the first complete assistant text entry after `offset` bytes."""
+        try:
+            if not session_file.exists() or session_file.stat().st_size <= offset:
+                return None
+            with open(session_file, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(offset)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        msg = obj.get("message", {})
+                        if msg.get("role") != "assistant":
+                            continue
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            # Skip intermediate messages that still have tool_use —
+                            # Claude hasn't finished yet. Only the final assistant
+                            # message (text only, no pending tool calls) is the reply.
+                            if any(c.get("type") == "tool_use" for c in content):
+                                continue
+                            text = "\n".join(
+                                c.get("text", "")
+                                for c in content
+                                if c.get("type") == "text"
+                            )
+                        else:
+                            text = str(content)
+                        if text.strip():
+                            return text.strip()
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+        except Exception:
+            pass
+        return None
+
+    def _sessions_dir(self) -> Path:
+        project_name = config.PROJECT_DIR.replace("/", "-")
+        return Path.home() / ".claude" / "projects" / project_name
+
+    def _wait_for_jsonl_response(
+        self,
+        session_file: Optional[Path],
+        initial_size: int,
+    ) -> str:
+        """
+        Poll for a new complete assistant text entry.
+
+        If session_file is known, poll it directly.
+        If session_file is None (new session, file not yet created), scan all
+        session files modified after _spawn_time — Claude creates the JSONL on
+        the first exchange, not at startup.  Once found, save the session ID.
+        """
+        deadline = time.time() + _RESPONSE_TIMEOUT
+
+        if session_file is not None:
+            # Known session — poll the specific file.
+            while time.time() < deadline and self._running:
+                time.sleep(_POLL_INTERVAL)
+                text = self._read_new_assistant_entry(session_file, initial_size)
+                if text:
+                    log.info(f"Got response from JSONL ({len(text)} chars)")
+                    return text
+        else:
+            # Unknown session — scan all files newer than spawn time.
+            sessions_dir = self._sessions_dir()
+            # Baseline: current sizes of all existing files.
+            try:
+                baseline = {
+                    f: f.stat().st_size
+                    for f in sessions_dir.glob("*.jsonl")
+                }
+            except Exception:
+                baseline = {}
+
+            while time.time() < deadline and self._running:
+                time.sleep(_POLL_INTERVAL)
+                try:
+                    for f in sessions_dir.glob("*.jsonl"):
+                        # Only consider files created/modified after spawn.
+                        if f.stat().st_mtime <= self._spawn_time:
+                            continue
+                        offset = baseline.get(f, 0)
+                        text = self._read_new_assistant_entry(f, offset)
+                        if text:
+                            sid = f.stem
+                            self._save_session_id(sid)
+                            self.current_session_id = sid
+                            log.info(
+                                f"Session ID captured on first response: {sid[:8]}..."
+                            )
+                            log.info(f"Got response from JSONL ({len(text)} chars)")
+                            return text
+                except Exception as e:
+                    log.warning(f"Session scan error: {e}")
+
+        log.error("Timeout waiting for JSONL response")
+        return "(response timed out — please try again)"
+
+    # ------------------------------------------------------------------
     # Queue processor thread (state machine)
     # ------------------------------------------------------------------
 
     def _queue_processor_thread(self):
-        """
-        Processes queued messages from Telegram / Proactive.
-        Waits for sentinel after each injection before processing next.
-        """
         while self._running:
             item = self.input_queue.get()
             if item is None:
@@ -315,33 +381,42 @@ class SessionManagerNode:
             with self.state_lock:
                 self.state = "GENERATING"
                 self.current_item = item
-                self.response_buffer = []
-            self.response_ready.clear()
 
-            log.info(f"Processing queued message from {item.source}: {item.text[:50]}...")
+            log.info(f"Processing message from {item.source}: {item.text[:50]!r}")
 
-            # Inject message into Claude's stdin via PTY
+            # If we know the session file, record its current size so we only
+            # read entries written AFTER this message. If session_id is unknown
+            # (first exchange on a new session), pass None — _wait_for_jsonl_response
+            # will scan all files and capture the ID from the first response.
+            if self.current_session_id:
+                session_file: Optional[Path] = self._get_session_file_path(self.current_session_id)
+                try:
+                    initial_size = session_file.stat().st_size if session_file.exists() else 0
+                except Exception:
+                    initial_size = 0
+            else:
+                session_file = None
+                initial_size = 0
+
+            # Inject message via PTY.
+            # Claude's TUI runs in raw terminal mode: Enter = \r (not \n).
             try:
-                os.write(self.master_fd, (item.text + "\n").encode())
+                os.write(self.master_fd, (item.text + "\r").encode())
             except OSError:
-                log.error("Failed to write queued message to PTY")
+                log.error("Failed to write message to PTY")
                 with self.state_lock:
                     self.state = "IDLE"
                     self.current_item = None
                 self._flush_keyboard_buffer()
                 continue
 
-            # Wait for sentinel (response complete)
-            self.response_ready.wait()
-
-            response_bytes = b"".join(self.response_buffer)
-            self._publish_response(item, response_bytes)
+            # Poll JSONL for Claude's response.
+            response_text = self._wait_for_jsonl_response(session_file, initial_size)
+            self._publish_response(item, response_text)
 
             with self.state_lock:
                 self.state = "IDLE"
                 self.current_item = None
-
-            # Flush any keyboard bytes that arrived while GENERATING
             self._flush_keyboard_buffer()
 
     def _flush_keyboard_buffer(self):
@@ -361,17 +436,14 @@ class SessionManagerNode:
     # Response publishing
     # ------------------------------------------------------------------
 
-    def _publish_response(self, item: QueueItem, response_bytes: bytes):
-        clean = _ANSI_RE.sub(b"", response_bytes).decode("utf-8", errors="replace").strip()
-
-        # Strip memory tags for delivery (MemoryNode reads them before stripping)
-        # For now, pass raw clean text — MemoryNode will be added in phase 2
+    def _publish_response(self, item: QueueItem, response_text: str):
+        # Phase 2 (MemoryNode) will intercept here to extract [REMEMBER] tags
+        # before this payload reaches TelegramNode.
         payload = json.dumps({
-            "text": clean,
+            "text": response_text,
             "source": item.source,
             "user_id": item.user_id,
         }) + "\n"
-
         payload_bytes = payload.encode()
 
         with self.response_subs_lock:
@@ -385,12 +457,13 @@ class SessionManagerNode:
                 self.response_subscribers.remove(conn)
                 log.info("Removed dead response subscriber")
 
+        log.info(f"Published response to {len(self.response_subscribers)} subscriber(s)")
+
     # ------------------------------------------------------------------
     # Socket servers
     # ------------------------------------------------------------------
 
     def _user_input_server_thread(self):
-        """Accepts NDJSON messages from Telegram / Proactive nodes."""
         sock_path = config.USER_INPUT_SOCK
         if os.path.exists(sock_path):
             os.unlink(sock_path)
@@ -398,7 +471,7 @@ class SessionManagerNode:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(sock_path)
         server.listen(5)
-        log.info(f"user_input.sock listening")
+        log.info("user_input.sock listening")
 
         while self._running:
             try:
@@ -436,7 +509,6 @@ class SessionManagerNode:
                         log.warning(f"Bad input message: {e}")
 
     def _cli_input_server_thread(self):
-        """Accepts raw keyboard bytes from CLINode."""
         sock_path = config.CLI_INPUT_SOCK
         if os.path.exists(sock_path):
             os.unlink(sock_path)
@@ -444,7 +516,7 @@ class SessionManagerNode:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(sock_path)
         server.listen(1)
-        log.info(f"cli_input.sock listening")
+        log.info("cli_input.sock listening")
 
         while self._running:
             try:
@@ -457,11 +529,6 @@ class SessionManagerNode:
                 break
 
     def _handle_cli_input(self, conn: socket.socket):
-        """
-        Forward keyboard bytes to Claude PTY, buffering during GENERATING.
-        Control messages are prefixed with 0x00 and are JSON lines:
-          \x00{"type":"resize","rows":N,"cols":N}\n
-        """
         buf = b""
         with conn:
             while True:
@@ -474,13 +541,10 @@ class SessionManagerNode:
 
                 buf += data
 
-                # Extract and handle control messages (0x00-prefixed JSON lines)
                 while b"\x00" in buf:
                     pre, _, rest = buf.partition(b"\x00")
-                    # Forward any bytes before the control marker
                     if pre:
                         self._route_keyboard_bytes(pre)
-                    # Find end of control message
                     if b"\n" in rest:
                         line, _, buf = rest.partition(b"\n")
                         try:
@@ -496,11 +560,9 @@ class SessionManagerNode:
                         except (json.JSONDecodeError, KeyError):
                             pass
                     else:
-                        # Incomplete control message — wait for more data
                         buf = b"\x00" + rest
                         break
                 else:
-                    # No control marker — all keyboard bytes
                     if buf:
                         self._route_keyboard_bytes(buf)
                         buf = b""
@@ -508,7 +570,6 @@ class SessionManagerNode:
         log.info("CLINode keyboard disconnected")
 
     def _route_keyboard_bytes(self, data: bytes):
-        """Forward keyboard bytes to PTY, or buffer if GENERATING."""
         with self.state_lock:
             generating = self.state == "GENERATING"
             if generating:
@@ -517,7 +578,6 @@ class SessionManagerNode:
                 self._write_to_pty(data)
 
     def _display_server_thread(self):
-        """Streams raw PTY output to CLINode (one connection at a time)."""
         sock_path = config.DISPLAY_SOCK
         if os.path.exists(sock_path):
             os.unlink(sock_path)
@@ -525,7 +585,7 @@ class SessionManagerNode:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(sock_path)
         server.listen(1)
-        log.info(f"display.sock listening")
+        log.info("display.sock listening")
 
         while self._running:
             try:
@@ -542,7 +602,6 @@ class SessionManagerNode:
                 break
 
     def _response_server_thread(self):
-        """Accepts subscribers on claude_response.sock (RouterNode, etc.)."""
         sock_path = config.CLAUDE_RESPONSE_SOCK
         if os.path.exists(sock_path):
             os.unlink(sock_path)
@@ -550,7 +609,7 @@ class SessionManagerNode:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(sock_path)
         server.listen(5)
-        log.info(f"claude_response.sock listening")
+        log.info("claude_response.sock listening")
 
         while self._running:
             try:
@@ -570,7 +629,7 @@ class SessionManagerNode:
         if lock.exists():
             try:
                 pid = int(lock.read_text().strip())
-                os.kill(pid, 0)  # check if process exists
+                os.kill(pid, 0)
                 log.error(f"Another SessionManagerNode running (PID {pid})")
                 return False
             except (ProcessLookupError, ValueError):

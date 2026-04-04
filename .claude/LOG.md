@@ -1559,3 +1559,11 @@ os.close(slave_fd)
 ### Sat 04 Apr 2026 08:20:19 IDT
 Phase 3: TelegramNode implemented and verified. Bot polling confirmed (getUpdates 200 OK). Handles text, voice (Groq), photos, documents. Typing keepalive every 4s. Memory tag stripping. 4096-char split. Subscribes to claude_response.sock for responses. Bug fixed: double app.build() caused self-inflicted 409 Conflict — resolved by using single build with post_init callback.
 
+### Sat 04 Apr 2026 13:56:29 IDT
+Phase 3+: Telegram↔Claude relay verified end-to-end. Root causes fixed:
+1. Sentinel PTY detection: Claude's interactive TUI suppresses sentinel tokens from terminal output — they appear in JSONL but not in raw PTY bytes. Replaced sentinel approach with JSONL polling.
+2. Message submission: queue processor sent \n but Claude TUI raw mode requires \r for Enter.
+3. Session capture: JSONL file not created until first exchange, not at spawn. Fixed by scanning all files on first response.
+4. Partial responses: JSONL watcher was picking up intermediate tool_use assistant entries. Fixed by skipping entries with tool_use in content.
+Result: relay fully functional — messages go Telegram→session_manager→Claude→JSONL→session_manager→Telegram.
+
