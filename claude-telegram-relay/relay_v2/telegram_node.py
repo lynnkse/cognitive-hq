@@ -33,9 +33,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from telegram import Update
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -142,12 +146,15 @@ def _send_to_session_manager(text: str, source: str, user_id: str, media_path: O
 class ResponseSubscriber:
     """
     Maintains a persistent connection to claude_response.sock.
-    Runs in a background thread, puts decoded responses onto an asyncio queue.
+    Routes messages to two queues:
+      _response_queue   — normal {text, source, user_id} messages
+      _permission_queue — {type:"permission_request", tool_name, tool_input} messages
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
-        self._queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._response_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._permission_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._thread = threading.Thread(target=self._reader_thread, daemon=True)
         self._thread.start()
 
@@ -173,9 +180,14 @@ class ResponseSubscriber:
                             continue
                         try:
                             msg = json.loads(line)
-                            self._loop.call_soon_threadsafe(
-                                self._queue.put_nowait, msg
-                            )
+                            if msg.get("type") == "permission_request":
+                                self._loop.call_soon_threadsafe(
+                                    self._permission_queue.put_nowait, msg
+                                )
+                            else:
+                                self._loop.call_soon_threadsafe(
+                                    self._response_queue.put_nowait, msg
+                                )
                         except json.JSONDecodeError as e:
                             log.warning(f"Bad response JSON: {e}")
             except Exception as e:
@@ -188,7 +200,25 @@ class ResponseSubscriber:
             time.sleep(3)
 
     async def get(self) -> dict:
-        return await self._queue.get()
+        return await self._response_queue.get()
+
+    async def get_permission(self) -> dict:
+        return await self._permission_queue.get()
+
+
+# ── Permission debug log ──────────────────────────────────────────────────────
+
+_PLOG_FILE = "/tmp/telegram_permission.log"
+
+def _plog(msg: str):
+    from datetime import datetime
+    line = f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} [telegram] {msg}\n"
+    log.info(f"[perm] {msg}")
+    try:
+        with open(_PLOG_FILE, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 
 # ── Core handler logic ────────────────────────────────────────────────────────
@@ -267,6 +297,74 @@ async def _handle_and_reply(
             os.unlink(media_path)
         except Exception:
             pass
+
+
+# ── Permission request handling ───────────────────────────────────────────────
+
+def _send_permission_response(decision: str):
+    """Send allow/deny decision back to SessionManagerNode."""
+    msg = {"type": "permission_response", "decision": decision}
+    payload = (json.dumps(msg) + "\n").encode()
+    _plog(f"sending permission_response decision={decision} to {config.USER_INPUT_SOCK}")
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(config.USER_INPUT_SOCK)
+        sock.sendall(payload)
+        sock.close()
+        _plog("permission_response sent OK")
+    except Exception as e:
+        log.error(f"Failed to send permission response: {e}")
+        _plog(f"ERROR sending permission_response: {e}")
+
+
+def _format_permission_message(tool_name: str, tool_input: dict) -> str:
+    lines = [f"Claude wants to use: *{tool_name}*"]
+    # Show the most relevant field(s) for common tools
+    if "command" in tool_input:
+        lines.append(f"`{tool_input['command'][:200]}`")
+    elif "file_path" in tool_input:
+        lines.append(f"`{tool_input['file_path']}`")
+    elif tool_input:
+        # Show first field as fallback
+        key, val = next(iter(tool_input.items()))
+        lines.append(f"`{key}: {str(val)[:200]}`")
+    lines.append("\nAllow?")
+    return "\n".join(lines)
+
+
+async def _permission_dispatcher(
+    subscriber: ResponseSubscriber,
+    bot,
+    authorized_user_id: str,
+):
+    """
+    Background task: reads permission requests from the subscriber and
+    sends an inline keyboard to the authorized user.
+    """
+    while True:
+        msg = await subscriber.get_permission()
+        tool_name = msg.get("tool_name", "unknown")
+        tool_input = msg.get("tool_input", {})
+        log.info(f"Sending permission request to Telegram: {tool_name}")
+
+        text = _format_permission_message(tool_name, tool_input)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Allow", callback_data="perm:allow"),
+                InlineKeyboardButton("Deny", callback_data="perm:deny"),
+            ]
+        ])
+        try:
+            await bot.send_message(
+                chat_id=authorized_user_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            log.error(f"Failed to send permission request to Telegram: {e}")
+            # Auto-deny so Claude isn't stuck
+            _send_permission_response("deny")
 
 
 # ── Message handlers ──────────────────────────────────────────────────────────
@@ -351,6 +449,202 @@ def _make_handlers(subscriber: ResponseSubscriber):
     return on_text, on_voice, on_photo, on_document
 
 
+# ── Slash command handlers ────────────────────────────────────────────────────
+
+def _read_session_jsonl(session_id: str) -> list[dict]:
+    project_name = config.PROJECT_DIR.replace("/", "-")
+    session_file = Path.home() / ".claude" / "projects" / project_name / f"{session_id}.jsonl"
+    entries = []
+    if not session_file.exists():
+        return entries
+    with open(session_file, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def _make_slash_handlers():
+
+    async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not _is_authorized(update):
+            return
+        text = (
+            "*Available commands*\n\n"
+            "/usage — token usage for current 5h window\n"
+            "/model — current Claude model\n"
+            "/status — relay health check\n"
+            "/clear — start a fresh Claude session (takes effect on next restart)\n"
+            "/help — this message"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not _is_authorized(update):
+            return
+        lines = ["*Relay Status*\n"]
+        lock = Path(config.LOCK_FILE)
+        if lock.exists():
+            try:
+                pid = int(lock.read_text().strip())
+                os.kill(pid, 0)
+                lines.append(f"✅ SessionManager running (PID {pid})")
+            except (ProcessLookupError, ValueError):
+                lines.append("❌ SessionManager not running (stale lock)")
+        else:
+            lines.append("❌ SessionManager not running")
+        try:
+            sid = Path(config.SESSION_ID_FILE).read_text().strip()
+            lines.append(f"Session: `{sid[:8]}...`")
+        except Exception:
+            lines.append("Session: none")
+        for name, path in [
+            ("user\\_input.sock", config.USER_INPUT_SOCK),
+            ("permission.sock", config.PERMISSION_SOCK),
+        ]:
+            lines.append(f"{'✅' if Path(path).exists() else '❌'} {name}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not _is_authorized(update):
+            return
+
+        tz = ZoneInfo(config.USER_TIMEZONE or "UTC")
+        now = time.time()
+        window_cutoff = now - 5 * 3600
+        week_cutoff   = now - 7 * 24 * 3600
+
+        project_name  = config.PROJECT_DIR.replace("/", "-")
+        sessions_dir  = Path.home() / ".claude" / "projects" / project_name
+
+        def _parse_ts(raw) -> Optional[float]:
+            if isinstance(raw, str):
+                try:
+                    return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    return None
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            return None
+
+        w5h  = dict(inp=0, out=0, cr=0, cc=0)
+        wk   = dict(inp=0, out=0, cr=0, cc=0)
+        earliest_5h: Optional[float] = None
+
+        try:
+            all_files = list(sessions_dir.glob("*.jsonl"))
+        except Exception:
+            all_files = []
+
+        for jfile in all_files:
+            try:
+                with open(jfile, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj  = json.loads(line)
+                            ts   = _parse_ts(obj.get("timestamp"))
+                            usage = obj.get("message", {}).get("usage")
+                            if not usage or ts is None:
+                                continue
+                            inp = usage.get("input_tokens", 0)
+                            out = usage.get("output_tokens", 0)
+                            cr  = usage.get("cache_read_input_tokens", 0)
+                            cc  = usage.get("cache_creation_input_tokens", 0)
+                            if ts >= week_cutoff:
+                                wk["inp"] += inp; wk["out"] += out
+                                wk["cr"]  += cr;  wk["cc"]  += cc
+                            if ts >= window_cutoff:
+                                w5h["inp"] += inp; w5h["out"] += out
+                                w5h["cr"]  += cr;  w5h["cc"]  += cc
+                                if earliest_5h is None or ts < earliest_5h:
+                                    earliest_5h = ts
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        # 5h window reset countdown
+        if earliest_5h:
+            reset_ts  = earliest_5h + 5 * 3600
+            reset_dt  = datetime.fromtimestamp(reset_ts, tz=tz)
+            mins_left = int((reset_ts - now) / 60)
+            if mins_left > 0:
+                h, m = divmod(mins_left, 60)
+                countdown = f"in {h}h {m}m" if h else f"in {m}m"
+            else:
+                countdown = "soon"
+            win_reset = f"{reset_dt.strftime('%H:%M %Z')} ({countdown})"
+        else:
+            win_reset = "no activity in window"
+
+        # Weekly reset — next Monday 00:00 local
+        now_dt     = datetime.fromtimestamp(now, tz=tz)
+        days_to_mon = (7 - now_dt.weekday()) % 7 or 7
+        wk_reset_dt = (now_dt + timedelta(days=days_to_mon)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        wk_reset = wk_reset_dt.strftime("%a %d/%m %H:%M %Z")
+
+        # Percentage helpers (limits from .env, 0 = not set)
+        lim_5h = int(config.get("USAGE_5H_LIMIT", "0") or 0)
+        lim_wk = int(config.get("USAGE_WEEK_LIMIT", "0") or 0)
+
+        def pct(used: int, limit: int) -> str:
+            return f" — {used * 100 // limit}%" if limit else ""
+
+        lines = [
+            f"*5h window* — resets {win_reset}",
+            f"Output: {w5h['out']:>9,}{pct(w5h['out'], lim_5h)}",
+            f"Input:  {w5h['inp']:>9,}",
+            f"Cache:  {w5h['cr']:>9,} read / {w5h['cc']:,} created",
+            "",
+            f"*7-day total* — resets {wk_reset}",
+            f"Output: {wk['out']:>9,}{pct(wk['out'], lim_wk)}",
+            f"Input:  {wk['inp']:>9,}",
+            f"Cache:  {wk['cr']:>9,} read / {wk['cc']:,} created",
+        ]
+        if not lim_5h or not lim_wk:
+            lines.append(
+                "\n_Set USAGE\\_5H\\_LIMIT and USAGE\\_WEEK\\_LIMIT in .env for % display_"
+            )
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not _is_authorized(update):
+            return
+        model = "unknown"
+        try:
+            session_id = Path(config.SESSION_ID_FILE).read_text().strip()
+            for obj in _read_session_jsonl(session_id):
+                m = obj.get("model")
+                if m:
+                    model = m
+        except Exception:
+            pass
+        await update.message.reply_text(f"Current model: `{model}`", parse_mode="Markdown")
+
+    async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not _is_authorized(update):
+            return
+        try:
+            Path(config.SESSION_ID_FILE).unlink(missing_ok=True)
+            await update.message.reply_text(
+                "✅ Session cleared. Restart SessionManagerNode to begin a fresh session."
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    return cmd_help, cmd_status, cmd_usage, cmd_model, cmd_clear
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -364,13 +658,57 @@ def main():
         loop = asyncio.get_event_loop()
         subscriber = ResponseSubscriber(loop)
         on_text, on_voice, on_photo, on_document = _make_handlers(subscriber)
+        cmd_help, cmd_status, cmd_usage, cmd_model, cmd_clear = _make_slash_handlers()
+
+        # Slash commands (intercepted before reaching Claude PTY)
+        application.add_handler(CommandHandler("help",   cmd_help))
+        application.add_handler(CommandHandler("status", cmd_status))
+        application.add_handler(CommandHandler("usage",  cmd_usage))
+        application.add_handler(CommandHandler("model",  cmd_model))
+        application.add_handler(CommandHandler("clear",  cmd_clear))
+
+        # Message handlers (forwarded to Claude PTY)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
         application.add_handler(MessageHandler(filters.VOICE, on_voice))
         application.add_handler(MessageHandler(filters.PHOTO, on_photo))
         application.add_handler(MessageHandler(filters.Document.ALL, on_document))
+
+        # Permission inline keyboard handler
+        async def on_permission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            query = update.callback_query
+            _plog(f"callback received: data={query.data!r} from_user={query.from_user.id}")
+
+            # Send permission decision FIRST, before any await that could fail
+            auth_ok = not AUTHORIZED_USER_ID or str(query.from_user.id) == AUTHORIZED_USER_ID
+            _plog(f"auth_ok={auth_ok} AUTHORIZED_USER_ID={AUTHORIZED_USER_ID!r}")
+            if auth_ok:
+                decision = "allow" if query.data == "perm:allow" else "deny"
+                _send_permission_response(decision)
+                log.info(f"Permission {decision} via Telegram button")
+
+            # Now handle Telegram UI updates (non-critical)
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            if auth_ok:
+                label = "✓ Allowed" if decision == "allow" else "✗ Denied"
+                try:
+                    await query.edit_message_text(label)
+                except Exception as e:
+                    log.warning(f"Could not edit permission message: {e}")
+
+        application.add_handler(CallbackQueryHandler(on_permission_callback, pattern="^perm:"))
+
+        # Start permission dispatcher as a background asyncio task
+        if AUTHORIZED_USER_ID:
+            loop.create_task(
+                _permission_dispatcher(subscriber, application.bot, AUTHORIZED_USER_ID)
+            )
+
         log.info(f"TelegramNode starting (authorized user: {AUTHORIZED_USER_ID or 'ANY'})")
 
-    app = Application.builder().token(token).post_init(post_init).build()
+    app = Application.builder().token(token).concurrent_updates(True).post_init(post_init).build()
     app.run_polling()
 
 

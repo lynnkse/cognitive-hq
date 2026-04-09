@@ -52,9 +52,13 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # How long to wait for Claude's response before giving up (seconds)
-_RESPONSE_TIMEOUT = 180
+# Needs to be long enough for multi-tool runs with several permission prompts
+_RESPONSE_TIMEOUT = 600
 # How often to poll the session JSONL (seconds)
 _POLL_INTERVAL = 0.5
+# If file has stopped growing for this long with no "text" entry, return
+# whatever text we have (catches cases where Claude ends on a tool_use)
+_STALL_FALLBACK = 30.0
 
 
 @dataclass
@@ -92,6 +96,12 @@ class SessionManagerNode:
         self.current_session_id: Optional[str] = None
         # Epoch time of most recent Claude spawn — used to filter session files
         self._spawn_time: float = 0.0
+
+        # Permission request state
+        # When a PermissionRequest hook connects, we hold its connection here
+        # until a decision arrives (from Telegram or CLI).
+        self._permission_conn: Optional[socket.socket] = None
+        self._permission_lock = threading.Lock()
 
         self._running = True
         self._reader_thread: Optional[threading.Thread] = None
@@ -267,11 +277,22 @@ class SessionManagerNode:
     # JSONL response detection
     # ------------------------------------------------------------------
 
-    def _read_new_assistant_entry(self, session_file: Path, offset: int) -> Optional[str]:
-        """Read the first complete assistant text entry after `offset` bytes."""
+    def _get_jsonl_state(self, session_file: Path, offset: int) -> tuple[Optional[str], Optional[str]]:
+        """
+        Scan assistant entries from `offset`.
+        Returns (last_text, last_assistant_type) where:
+          last_text            — text from the most recent assistant text entry
+          last_assistant_type  — content type of the very last assistant entry
+                                 ("text", "tool_use", "thinking", …)
+
+        Each content block is its own JSONL line, so we can tell whether Claude
+        is mid-tool-call (last type = "tool_use") or done (last type = "text").
+        """
+        last_text: Optional[str] = None
+        last_assistant_type: Optional[str] = None
         try:
-            if not session_file.exists() or session_file.stat().st_size <= offset:
-                return None
+            if not session_file.exists():
+                return None, None
             with open(session_file, "r", encoding="utf-8", errors="replace") as f:
                 f.seek(offset)
                 for line in f:
@@ -285,25 +306,24 @@ class SessionManagerNode:
                             continue
                         content = msg.get("content", "")
                         if isinstance(content, list):
-                            # Skip intermediate messages that still have tool_use —
-                            # Claude hasn't finished yet. Only the final assistant
-                            # message (text only, no pending tool calls) is the reply.
-                            if any(c.get("type") == "tool_use" for c in content):
-                                continue
-                            text = "\n".join(
-                                c.get("text", "")
-                                for c in content
-                                if c.get("type") == "text"
-                            )
+                            for c in content:
+                                ctype = c.get("type", "")
+                                if ctype:
+                                    last_assistant_type = ctype
+                                if ctype == "text":
+                                    text = c.get("text", "").strip()
+                                    if text:
+                                        last_text = text
                         else:
-                            text = str(content)
-                        if text.strip():
-                            return text.strip()
+                            text = str(content).strip()
+                            if text:
+                                last_text = text
+                                last_assistant_type = "text"
                     except (json.JSONDecodeError, AttributeError):
                         continue
         except Exception:
             pass
-        return None
+        return last_text, last_assistant_type
 
     def _sessions_dir(self) -> Path:
         project_name = config.PROJECT_DIR.replace("/", "-")
@@ -315,53 +335,126 @@ class SessionManagerNode:
         initial_size: int,
     ) -> str:
         """
-        Poll for a new complete assistant text entry.
+        Poll for a complete assistant text entry using debounce.
 
-        If session_file is known, poll it directly.
-        If session_file is None (new session, file not yet created), scan all
-        session files modified after _spawn_time — Claude creates the JSONL on
-        the first exchange, not at startup.  Once found, save the session ID.
+        Claude writes content items as separate JSONL lines (text, tool_use,
+        thinking each get their own entry).  We want the LAST text entry once
+        the response is fully done.  Strategy:
+          - Track file size; on each growth record time + fetch last text entry.
+          - Return when file hasn't grown for DEBOUNCE seconds (response done).
+
+        If session_file is None (new session), scan all files newer than
+        _spawn_time — Claude creates the JSONL only on the first exchange.
         """
+        # Silence after the LAST assistant entry signals response complete —
+        # but ONLY when that last entry is "text", not "tool_use".  During tool
+        # execution the file stops growing while Claude Code runs the tool;
+        # we must not mistake that gap for the end of the response.
+        _DEBOUNCE = 1.5  # seconds of silence after last "text" entry → done
+
         deadline = time.time() + _RESPONSE_TIMEOUT
 
         if session_file is not None:
             # Known session — poll the specific file.
+            last_text: Optional[str] = None
+            last_assistant_type: Optional[str] = None
+            last_file_size = initial_size
+            last_activity_time: float = 0.0
+            activity_seen = False
+
             while time.time() < deadline and self._running:
                 time.sleep(_POLL_INTERVAL)
-                text = self._read_new_assistant_entry(session_file, initial_size)
-                if text:
-                    log.info(f"Got response from JSONL ({len(text)} chars)")
-                    return text
+                try:
+                    current_size = session_file.stat().st_size if session_file.exists() else initial_size
+                except Exception:
+                    current_size = initial_size
+
+                if current_size > last_file_size:
+                    activity_seen = True
+                    last_file_size = current_size
+                    last_activity_time = time.time()
+                    text, atype = self._get_jsonl_state(session_file, initial_size)
+                    if text:
+                        last_text = text
+                    if atype:
+                        last_assistant_type = atype
+
+                elapsed = time.time() - last_activity_time
+                # Primary: last entry is "text" and file has been quiet for DEBOUNCE.
+                if (
+                    activity_seen
+                    and last_text
+                    and last_assistant_type == "text"
+                    and elapsed >= _DEBOUNCE
+                ):
+                    log.info(f"Response complete ({len(last_text)} chars)")
+                    return last_text
+                # Fallback: file stalled for a long time without a final text entry.
+                # Return whatever text we have so Telegram isn't left silent.
+                if (
+                    activity_seen
+                    and last_text
+                    and elapsed >= _STALL_FALLBACK
+                ):
+                    log.warning(
+                        f"Response stalled ({last_assistant_type} was last type) — "
+                        f"returning best text after {elapsed:.0f}s"
+                    )
+                    return last_text
         else:
             # Unknown session — scan all files newer than spawn time.
             sessions_dir = self._sessions_dir()
-            # Baseline: current sizes of all existing files.
             try:
-                baseline = {
+                baseline: dict[Path, int] = {
                     f: f.stat().st_size
                     for f in sessions_dir.glob("*.jsonl")
                 }
             except Exception:
                 baseline = {}
 
+            # Per-file debounce state.
+            file_last_text: dict[Path, Optional[str]] = {}
+            file_last_atype: dict[Path, Optional[str]] = {}
+            file_last_size: dict[Path, int] = {}
+            file_last_activity: dict[Path, float] = {}
+            file_activity_seen: dict[Path, bool] = {}
+
             while time.time() < deadline and self._running:
                 time.sleep(_POLL_INTERVAL)
                 try:
                     for f in sessions_dir.glob("*.jsonl"):
-                        # Only consider files created/modified after spawn.
                         if f.stat().st_mtime <= self._spawn_time:
                             continue
                         offset = baseline.get(f, 0)
-                        text = self._read_new_assistant_entry(f, offset)
-                        if text:
+                        try:
+                            current_size = f.stat().st_size
+                        except Exception:
+                            continue
+
+                        prev_size = file_last_size.get(f, offset)
+                        if current_size > prev_size:
+                            file_activity_seen[f] = True
+                            file_last_size[f] = current_size
+                            file_last_activity[f] = time.time()
+                            text, atype = self._get_jsonl_state(f, offset)
+                            if text:
+                                file_last_text[f] = text
+                            if atype:
+                                file_last_atype[f] = atype
+
+                        if (
+                            file_activity_seen.get(f)
+                            and file_last_text.get(f)
+                            and file_last_atype.get(f) == "text"
+                            and (time.time() - file_last_activity.get(f, 0)) >= _DEBOUNCE
+                        ):
                             sid = f.stem
                             self._save_session_id(sid)
                             self.current_session_id = sid
-                            log.info(
-                                f"Session ID captured on first response: {sid[:8]}..."
-                            )
-                            log.info(f"Got response from JSONL ({len(text)} chars)")
-                            return text
+                            response = file_last_text[f]
+                            log.info(f"Session ID captured on first response: {sid[:8]}...")
+                            log.info(f"Response complete ({len(response)} chars)")
+                            return response
                 except Exception as e:
                     log.warning(f"Session scan error: {e}")
 
@@ -499,12 +592,19 @@ class SessionManagerNode:
                         continue
                     try:
                         msg = json.loads(line)
-                        self.input_queue.put(QueueItem(
-                            text=msg["text"],
-                            source=msg.get("source", "unknown"),
-                            user_id=msg.get("user_id", ""),
-                            media_path=msg.get("media_path"),
-                        ))
+                        if msg.get("type") == "permission_response":
+                            log.info(f"permission_response received: decision={msg.get('decision')!r}")
+                            self._resolve_permission(
+                                msg.get("decision", "deny"),
+                                msg.get("message", ""),
+                            )
+                        else:
+                            self.input_queue.put(QueueItem(
+                                text=msg["text"],
+                                source=msg.get("source", "unknown"),
+                                user_id=msg.get("user_id", ""),
+                                media_path=msg.get("media_path"),
+                            ))
                     except (json.JSONDecodeError, KeyError) as e:
                         log.warning(f"Bad input message: {e}")
 
@@ -572,10 +672,15 @@ class SessionManagerNode:
     def _route_keyboard_bytes(self, data: bytes):
         with self.state_lock:
             generating = self.state == "GENERATING"
-            if generating:
+
+        with self._permission_lock:
+            permission_pending = self._permission_conn is not None
+
+        if generating and not permission_pending:
+            with self.state_lock:
                 self.keyboard_buffer.append(data)
-            else:
-                self._write_to_pty(data)
+        else:
+            self._write_to_pty(data)
 
     def _display_server_thread(self):
         sock_path = config.DISPLAY_SOCK
@@ -619,6 +724,125 @@ class SessionManagerNode:
                     self.response_subscribers.append(conn)
             except Exception:
                 break
+
+    def _permission_server_thread(self):
+        """
+        Listens for connections from permission_hook.py.
+
+        Each connection carries one permission request (NDJSON line).
+        We hold the connection open, broadcast the request to all response
+        subscribers (TelegramNode, etc.), and wait for a decision.
+        The decision arrives either via _handle_input_conn (from TelegramNode's
+        callback) or is sent directly to the held connection by
+        _resolve_permission().
+        """
+        sock_path = config.PERMISSION_SOCK
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(sock_path)
+        server.listen(1)
+        log.info("permission.sock listening")
+
+        while self._running:
+            try:
+                conn, _ = server.accept()
+                threading.Thread(
+                    target=self._handle_permission_conn, args=(conn,), daemon=True
+                ).start()
+            except Exception:
+                break
+
+    def _handle_permission_conn(self, conn: socket.socket):
+        """Read one permission request, hold conn open until decision arrives."""
+        buf = b""
+        try:
+            conn.settimeout(10)
+            while b"\n" not in buf:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    return
+                buf += chunk
+            conn.settimeout(None)
+        except Exception as e:
+            log.warning(f"Permission hook read error: {e}")
+            conn.close()
+            return
+
+        line = buf.split(b"\n")[0].strip()
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            log.warning("Permission hook: bad JSON")
+            conn.close()
+            return
+
+        tool_name = request.get("tool_name", "unknown")
+        tool_input = request.get("tool_input", {})
+        log.info(f"Permission request: {tool_name} {str(tool_input)[:80]}")
+
+        with self._permission_lock:
+            if self._permission_conn is not None:
+                # Concurrent request — shouldn't happen with a serial queue,
+                # but just in case: deny and close the old one.
+                log.warning("Permission request arrived while one is pending — denying old")
+                try:
+                    self._permission_conn.sendall(
+                        json.dumps({"decision": "deny", "message": "Superseded."}).encode() + b"\n"
+                    )
+                    self._permission_conn.close()
+                except Exception:
+                    pass
+            self._permission_conn = conn
+
+        # Broadcast to all subscribers so TelegramNode can show inline buttons
+        self._publish_permission_request(tool_name, tool_input)
+
+        # The connection is now held open; _resolve_permission() will close it
+        # when the decision arrives.
+
+    def _publish_permission_request(self, tool_name: str, tool_input: dict):
+        payload = json.dumps({
+            "type": "permission_request",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+        }) + "\n"
+        payload_bytes = payload.encode()
+        with self.response_subs_lock:
+            dead = []
+            for conn in self.response_subscribers:
+                try:
+                    conn.sendall(payload_bytes)
+                except Exception:
+                    dead.append(conn)
+            for conn in dead:
+                self.response_subscribers.remove(conn)
+
+    def _resolve_permission(self, decision: str, message: str = ""):
+        """
+        Called when the user makes a permission decision (allow/deny).
+        Sends the response to the waiting permission_hook.py connection.
+        """
+        with self._permission_lock:
+            conn = self._permission_conn
+            self._permission_conn = None
+
+        log.info(f"_resolve_permission: decision={decision!r} conn={conn}")
+        if conn is None:
+            log.warning("_resolve_permission called but no pending permission request")
+            return
+
+        payload = {"decision": decision}
+        if message:
+            payload["message"] = message
+        try:
+            conn.sendall((json.dumps(payload) + "\n").encode())
+            conn.close()
+        except Exception as e:
+            log.warning(f"Failed to send permission decision: {e}")
+
+        log.info(f"Permission resolved: {decision}")
 
     # ------------------------------------------------------------------
     # Lock file
@@ -668,6 +892,7 @@ class SessionManagerNode:
             threading.Thread(target=self._cli_input_server_thread, daemon=True),
             threading.Thread(target=self._display_server_thread, daemon=True),
             threading.Thread(target=self._response_server_thread, daemon=True),
+            threading.Thread(target=self._permission_server_thread, daemon=True),
         ]
         for t in threads:
             t.start()
@@ -701,6 +926,7 @@ class SessionManagerNode:
             config.CLI_INPUT_SOCK,
             config.DISPLAY_SOCK,
             config.CLAUDE_RESPONSE_SOCK,
+            config.PERMISSION_SOCK,
         ]:
             try:
                 os.unlink(sock_path)

@@ -53,9 +53,14 @@ USER_INPUT_SOCK: str = f"{SOCKET_DIR}/user_input.sock"
 CLAUDE_RESPONSE_SOCK: str = f"{SOCKET_DIR}/claude_response.sock"
 DISPLAY_SOCK: str = f"{SOCKET_DIR}/display.sock"
 CLI_INPUT_SOCK: str = f"{SOCKET_DIR}/cli_input.sock"
+PERMISSION_SOCK: str = f"{SOCKET_DIR}/permission.sock"
 
 # Runtime state dir
 RELAY_DIR: str = get("RELAY_DIR", str(Path.home() / ".claude-relay"))
 SESSION_ID_FILE: str = f"{RELAY_DIR}/session_id"
 LOCK_FILE: str = f"{RELAY_DIR}/session_manager.lock"
 SENTINEL_FILE: str = f"{RELAY_DIR}/sentinel"
+
+# Optional usage limits (set in .env to enable % display in /usage)
+# e.g. USAGE_5H_LIMIT=10000  USAGE_WEEK_LIMIT=100000
+# Leave unset (0) to show raw counts only.
