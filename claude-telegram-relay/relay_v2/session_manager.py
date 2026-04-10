@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Optional
 
 import config
+import supabase_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -477,6 +478,13 @@ class SessionManagerNode:
 
             log.info(f"Processing message from {item.source}: {item.text[:50]!r}")
 
+            # Persist user message to Supabase
+            supabase_client.save_message(
+                role="user",
+                content=item.text,
+                channel=item.source,
+            )
+
             # If we know the session file, record its current size so we only
             # read entries written AFTER this message. If session_id is unknown
             # (first exchange on a new session), pass None — _wait_for_jsonl_response
@@ -530,10 +538,15 @@ class SessionManagerNode:
     # ------------------------------------------------------------------
 
     def _publish_response(self, item: QueueItem, response_text: str):
-        # Phase 2 (MemoryNode) will intercept here to extract [REMEMBER] tags
-        # before this payload reaches TelegramNode.
+        # Parse memory tags, save to Supabase, strip tags from delivered text
+        clean_text = supabase_client.process_response(response_text, channel=item.source)
+        supabase_client.save_message(
+            role="assistant",
+            content=clean_text,
+            channel=item.source,
+        )
         payload = json.dumps({
-            "text": response_text,
+            "text": clean_text,
             "source": item.source,
             "user_id": item.user_id,
         }) + "\n"

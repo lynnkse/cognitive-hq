@@ -71,3 +71,30 @@ Logged to `/tmp/permission_hook.log` with `AUTO-ALLOW:` prefix for audit trail.
 **Fix 1:** Raised `_RESPONSE_TIMEOUT` to 600s (10 minutes).
 
 **Fix 2:** Added `_STALL_FALLBACK` (30s): if the JSONL file stops growing but the last entry is not "text" type, return the best text we have rather than waiting for deadline. Handles edge case where Claude finishes without a closing text message.
+
+## 2026-04-10 — Supabase persistence wired up + validated
+
+### What was done
+- Restored paused Supabase project (`jcwdfuusolpxnciqgstl`, `eu-central-1`). Schema was already applied from a previous session — `messages`, `memory`, `logs` tables with vector extension, RLS, and helper functions all present.
+- Built `relay_v2/supabase_client.py`: fire-and-forget REST writes using stdlib `urllib` (no new dependencies). All writes run in daemon threads so the relay is never blocked on DB I/O.
+- Hooked into `session_manager.py` at two points:
+  - User message enters queue → saved to `messages` (role: user, channel: source)
+  - Claude response received → tags parsed, response saved to `messages` (role: assistant), tags saved to `memory`
+- Memory tag parsing: `[REMEMBER: ...]` → fact, `[GOAL: ... | DEADLINE: ...]` → goal, `[DONE: ...]` → completed_goal. Tags stripped from text before delivery to Telegram (user never sees them).
+
+### Validated
+Live test confirmed both directions writing correctly to Supabase:
+- "Check now, i restarted it" (user, telegram) → saved ✓
+- Full assistant response (assistant, telegram) → saved clean, no tags ✓
+
+### Architecture note: what is NOT yet wired
+- Embeddings: `memory` and `messages` tables have `embedding VECTOR(1536)` column but it is empty. Requires Supabase Edge Function (`embed`) + OpenAI API key secret + database INSERT webhook. Not set up yet.
+- Claude reading from memory: nothing feeds past context back into Claude's system prompt yet. Memory is write-only at this stage.
+- CLI messages: CLI keyboard input bypasses the queue and goes straight to PTY — not saved to Supabase. Only Telegram and other socket-based frontends are persisted.
+
+### Design decision: embeddings on memory only
+Raw message history grows fast and degrades semantic search quality. Decision: when embeddings are set up, apply them only to the `memory` table (facts, goals, preferences) not to `messages`. This keeps the search index small and high-signal. Full dreaming mode consolidation (see `DREAMING_MODE.md`) is the long-term path for turning raw history into durable knowledge.
+
+### Added to TODO
+- Dreaming mode / memory consolidation R&D (see `DREAMING_MODE.md`)
+- GLM-Z1-32B evaluation for heavy coding tasks as free sub-agent under Claude supervision

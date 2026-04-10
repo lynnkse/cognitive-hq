@@ -6,6 +6,10 @@
 
 - [ ] **Message source metadata in responses** — Claude should know whether a message came from Telegram or CLI (or which CLI user, future multi-user). The `source` field already flows through QueueItem and is published with each response; expose it to the Claude prompt so it can tailor its reply (e.g. keep responses concise for Telegram, can be verbose for CLI). Consider injecting source into the PTY message prefix: `[from:telegram] user message here`.
 
+- [ ] **Dreaming mode / memory consolidation** — Background process that consolidates raw Supabase memory into high-signal durable knowledge. Runs when agent is idle. Three phases: light (extract candidates), REM (detect patterns, strengthen), deep (score + promote to durable memory). See `DREAMING_MODE.md` for full spec. **Prerequisite: plain Supabase memory must be working and validated first.**
+
+- [ ] **Evaluate GLM-Z1-32B (GLM 5.1) for heavy coding tasks** — New Chinese open-source model, strong at agentic coding, free to run. Explore using it as a sub-agent for heavy coding tasks while Claude acts as gatekeeper/supervisor: routes task, evaluates safety, reviews output before applying. Goal: free heavy lifting + Anthropic safety layer on top. Steps: (1) benchmark GLM-Z1-32B on a real coding task, (2) design orchestration protocol (Claude delegates, GLM executes agentic loop, Claude reviews result), (3) integrate into relay as an optional coding agent.
+
 ## Done
 
 - [x] Permission deadlock via PermissionRequest hook (concurrent_updates fix)
