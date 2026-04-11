@@ -126,6 +126,9 @@ class SessionManagerNode:
             parts.append(f"User timezone: {config.USER_TIMEZONE}")
         if profile:
             parts.append(f"\nProfile:\n{profile}")
+        memory_context = supabase_client.fetch_memory_context()
+        if memory_context:
+            parts.append(f"\n{memory_context}")
         parts.append(
             "\nMEMORY MANAGEMENT: When the user shares something worth remembering, "
             "include these tags in your response (processed automatically, hidden from user):\n"

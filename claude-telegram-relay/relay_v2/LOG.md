@@ -95,6 +95,15 @@ Live test confirmed both directions writing correctly to Supabase:
 ### Design decision: embeddings on memory only
 Raw message history grows fast and degrades semantic search quality. Decision: when embeddings are set up, apply them only to the `memory` table (facts, goals, preferences) not to `messages`. This keeps the search index small and high-signal. Full dreaming mode consolidation (see `DREAMING_MODE.md`) is the long-term path for turning raw history into durable knowledge.
 
+## 2026-04-11 — Memory injection validated end-to-end
+
+- Deployed `embed` Edge Function to Supabase, stored OpenAI API key as secret
+- Database webhooks already existed (`embed_memory`, `embed_messages`) — both firing correctly
+- Added `supabase_client.fetch_memory_context()` — fetches facts, preferences, goals at startup
+- `_build_system_prompt()` now injects long-term memory into Claude's system prompt on every session spawn
+- **Validated:** sent "do you know anything about me?" from Telegram — Claude responded with "Lynn likes to travel" (from memory table) without being told in that session. Full loop confirmed working:
+  `[REMEMBER: tag] → memory table → embedded → injected at next startup → Claude knows it`
+
 ### Added to TODO
 - Dreaming mode / memory consolidation R&D (see `DREAMING_MODE.md`)
 - GLM-Z1-32B evaluation for heavy coding tasks as free sub-agent under Claude supervision

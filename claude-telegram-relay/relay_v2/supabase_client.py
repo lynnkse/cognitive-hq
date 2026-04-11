@@ -100,6 +100,49 @@ def save_memory(type_: str, content: str, deadline: Optional[str] = None, priori
     _fire(_rest_insert, "memory", payload)
 
 
+def fetch_memory_context(limit: int = 50) -> str:
+    """
+    Fetch facts, preferences, and active goals from Supabase.
+    Returns a formatted string ready to inject into the system prompt.
+    Returns empty string if Supabase is not configured or unreachable.
+    """
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return ""
+
+    results = []
+    for type_filter, label in [("fact", "Facts"), ("preference", "Preferences"), ("goal", "Goals")]:
+        url = (
+            f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/memory"
+            f"?type=eq.{type_filter}&order=created_at.desc&limit={limit}"
+            f"&select=content,deadline"
+        )
+        req = urllib.request.Request(
+            url,
+            headers={
+                "apikey": config.SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                rows = json.loads(resp.read().decode())
+                if rows:
+                    items = []
+                    for r in rows:
+                        entry = r["content"]
+                        if r.get("deadline"):
+                            entry += f" (deadline: {r['deadline']})"
+                        items.append(f"- {entry}")
+                    results.append(f"{label}:\n" + "\n".join(items))
+        except Exception as e:
+            log.warning(f"Failed to fetch {type_filter} from Supabase: {e}")
+
+    if not results:
+        return ""
+
+    return "Long-term memory from past sessions:\n" + "\n\n".join(results)
+
+
 def process_response(text: str, channel: str = "telegram") -> str:
     """
     Parse memory tags from Claude's response text, save them to Supabase,
