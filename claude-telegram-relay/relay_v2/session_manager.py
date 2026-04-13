@@ -134,7 +134,11 @@ class SessionManagerNode:
             "include these tags in your response (processed automatically, hidden from user):\n"
             "[REMEMBER: fact to store]\n"
             "[GOAL: goal text | DEADLINE: optional date]\n"
-            "[DONE: search text for completed goal]"
+            "[DONE: search text for completed goal]\n"
+            "[INSIGHT: content | PROJECT: project_name | TYPE: architecture|failure_mode|performance|stability|design|procedure|warning|pattern | CONFIDENCE: 1-5]\n"
+            "Use INSIGHT for professional/technical observations: system architecture patterns, failure modes, "
+            "performance characteristics, mathematical stability edge cases, design tradeoffs. "
+            "PROJECT is optional (omit for cross-project insights). CONFIDENCE: 1=hypothesis, 3=observed, 5=battle-tested."
         )
         return "\n".join(parts)
 
