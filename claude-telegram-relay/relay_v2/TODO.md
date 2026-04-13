@@ -14,6 +14,8 @@
 
 - [ ] **Dreaming mode / memory consolidation** — Background process that consolidates raw Supabase memory into high-signal durable knowledge. Runs when agent is idle. Three phases: light (extract candidates), REM (detect patterns, strengthen), deep (score + promote to durable memory). See `DREAMING_MODE.md` for full spec. **Prerequisite: plain Supabase memory must be working and validated first.**
 
+- [ ] **GLM-Z1-32B sub-agent via MCP** — Build `glm_agent` MCP server that wraps GLM in an agentic tool loop. Claude calls `delegate_to_glm(task, context_files)`, GLM runs until done, Claude reviews and applies. Two backend options: (A) ZhipuAI API key — cheapest path, Lynn provides key; (B) local Ollama — free, needs ~20GB VRAM, one `ollama pull` command. I write all code, Lynn provides key or runs one command. Register via `claude mcp add glm-agent` automatically.
+
 - [ ] **Evaluate GLM-Z1-32B (GLM 5.1) for heavy coding tasks** — New Chinese open-source model, strong at agentic coding, free to run. Explore using it as a sub-agent for heavy coding tasks while Claude acts as gatekeeper/supervisor: routes task, evaluates safety, reviews output before applying. Goal: free heavy lifting + Anthropic safety layer on top. Steps: (1) benchmark GLM-Z1-32B on a real coding task, (2) design orchestration protocol (Claude delegates, GLM executes agentic loop, Claude reviews result), (3) integrate into relay as an optional coding agent.
 
 ## Done
