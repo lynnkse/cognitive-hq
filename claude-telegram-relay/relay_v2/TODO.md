@@ -2,6 +2,10 @@
 
 ## Pending
 
+- [ ] **GLM-Z1-32B sub-agent via MCP** — Build `glm_agent` MCP server that wraps GLM in an agentic tool loop. Claude calls `delegate_to_glm(task, context_files)`, GLM runs until done, Claude reviews and applies. Two backend options: (A) ZhipuAI API key — cheapest path, Lynn provides key; (B) local Ollama — free, needs ~20GB VRAM, one `ollama pull` command. I write all code, Lynn provides key or runs one command. Register via `claude mcp add glm-agent` automatically. **Use case: ROS/SLAM repo multi-file refactors — Claude orchestrates, GLM does heavy lifting, Claude reviews before applying.**
+
+- [ ] **Deploy relay on work PC for ROS/SLAM repo** — Clone relay to `~/claude-relay/` on work PC (outside catkin). Set `PROJECT_DIR=/path/to/ros/repo`, `CHANNEL=work`, same Supabase credentials. Relay spawns Claude with `cwd=PROJECT_DIR` so existing `.claude/BOOTSTRAP.md` structure is picked up automatically. No changes to ROS repo needed. Same Supabase DB — `channel` column separates personal vs work.
+
 - [ ] **`knowledge` table: professional insights across projects** — Separate table from `memory` (which stays personal). Stores lessons learned, procedures, patterns, warnings per project. Has `project` column (null = cross-project). Needs schema migration + `embed` webhook + injection into system prompt filtered by current project. Design doc needed before implementation.
 
 - [ ] **Agentic `search_memory` tool** — Instead of injecting all memory at startup (blunt), give Claude a tool it can call when it judges relevant context exists. Works for both `memory` and `knowledge` tables. Requires exposing a search endpoint the relay can call and pass results back to Claude mid-conversation.
@@ -15,8 +19,6 @@
 - [ ] **Dreaming mode / memory consolidation** — Background process that consolidates raw Supabase memory into high-signal durable knowledge. Runs when agent is idle. Three phases: light (extract candidates), REM (detect patterns, strengthen), deep (score + promote to durable memory). See `DREAMING_MODE.md` for full spec. **Prerequisite: plain Supabase memory must be working and validated first.**
 
 - [ ] **GLM-Z1-32B sub-agent via MCP** — Build `glm_agent` MCP server that wraps GLM in an agentic tool loop. Claude calls `delegate_to_glm(task, context_files)`, GLM runs until done, Claude reviews and applies. Two backend options: (A) ZhipuAI API key — cheapest path, Lynn provides key; (B) local Ollama — free, needs ~20GB VRAM, one `ollama pull` command. I write all code, Lynn provides key or runs one command. Register via `claude mcp add glm-agent` automatically.
-
-- [ ] **Evaluate GLM-Z1-32B (GLM 5.1) for heavy coding tasks** — New Chinese open-source model, strong at agentic coding, free to run. Explore using it as a sub-agent for heavy coding tasks while Claude acts as gatekeeper/supervisor: routes task, evaluates safety, reviews output before applying. Goal: free heavy lifting + Anthropic safety layer on top. Steps: (1) benchmark GLM-Z1-32B on a real coding task, (2) design orchestration protocol (Claude delegates, GLM executes agentic loop, Claude reviews result), (3) integrate into relay as an optional coding agent.
 
 ## Done
 
