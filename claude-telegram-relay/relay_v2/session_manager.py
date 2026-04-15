@@ -153,7 +153,7 @@ class SessionManagerNode:
             return None
 
     def _find_newest_session(self, not_before: float) -> Optional[str]:
-        project_name = config.PROJECT_DIR.replace("/", "-")
+        project_name = config.PROJECT_DIR.replace("/", "-").replace("_", "-")
         sessions_dir = Path.home() / ".claude" / "projects" / project_name
         files = sorted(
             sessions_dir.glob("*.jsonl"),
@@ -183,7 +183,7 @@ class SessionManagerNode:
         log.warning("Could not capture new session ID within 30s")
 
     def _get_session_file_path(self, session_id: str) -> Path:
-        project_name = config.PROJECT_DIR.replace("/", "-")
+        project_name = config.PROJECT_DIR.replace("/", "-").replace("_", "-")
         sessions_dir = Path.home() / ".claude" / "projects" / project_name
         return sessions_dir / f"{session_id}.jsonl"
 
@@ -334,7 +334,7 @@ class SessionManagerNode:
         return last_text, last_assistant_type
 
     def _sessions_dir(self) -> Path:
-        project_name = config.PROJECT_DIR.replace("/", "-")
+        project_name = config.PROJECT_DIR.replace("/", "-").replace("_", "-")
         return Path.home() / ".claude" / "projects" / project_name
 
     def _wait_for_jsonl_response(
@@ -513,10 +513,11 @@ class SessionManagerNode:
             # trailing \r, leaving the message sitting unsubmitted in the TUI.
             try:
                 encoded = item.text.encode()
-                chunk_size = 512
+                chunk_size = 256
                 for i in range(0, len(encoded), chunk_size):
                     os.write(self.master_fd, encoded[i:i + chunk_size])
-                    time.sleep(0.02)
+                    time.sleep(0.05)
+                time.sleep(0.1)
                 os.write(self.master_fd, b"\r")
             except OSError:
                 log.error("Failed to write message to PTY")
