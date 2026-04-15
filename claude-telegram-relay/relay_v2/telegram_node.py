@@ -155,6 +155,7 @@ class ResponseSubscriber:
         self._loop = loop
         self._response_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._permission_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._tui_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._thread = threading.Thread(target=self._reader_thread, daemon=True)
         self._thread.start()
 
@@ -184,6 +185,10 @@ class ResponseSubscriber:
                                 self._loop.call_soon_threadsafe(
                                     self._permission_queue.put_nowait, msg
                                 )
+                            elif msg.get("type") == "tui_prompt":
+                                self._loop.call_soon_threadsafe(
+                                    self._tui_queue.put_nowait, msg
+                                )
                             else:
                                 self._loop.call_soon_threadsafe(
                                     self._response_queue.put_nowait, msg
@@ -204,6 +209,9 @@ class ResponseSubscriber:
 
     async def get_permission(self) -> dict:
         return await self._permission_queue.get()
+
+    async def get_tui_prompt(self) -> dict:
+        return await self._tui_queue.get()
 
 
 # ── Permission debug log ──────────────────────────────────────────────────────
@@ -330,6 +338,42 @@ def _format_permission_message(tool_name: str, tool_input: dict) -> str:
         lines.append(f"`{key}: {str(val)[:200]}`")
     lines.append("\nAllow?")
     return "\n".join(lines)
+
+
+async def _tui_dispatcher(
+    subscriber: ResponseSubscriber,
+    bot,
+    authorized_user_id: str,
+):
+    """
+    Background task: reads TUI choice prompts from the subscriber and
+    sends inline keyboard buttons to the authorized user.
+    """
+    while True:
+        msg = await subscriber.get_tui_prompt()
+        question = msg.get("question", "Claude is asking:")
+        choices = msg.get("choices", [])
+        if not choices:
+            continue
+
+        log.info(f"Sending TUI prompt to Telegram: {question!r}")
+        buttons = [
+            InlineKeyboardButton(f"{c['num']}. {c['text']}", callback_data=f"tui:{c['num']}")
+            for c in choices
+        ]
+        # Two buttons per row
+        rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+        keyboard = InlineKeyboardMarkup(rows)
+        text = f"*Claude is asking:*\n{question}"
+        try:
+            await bot.send_message(
+                chat_id=authorized_user_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            log.error(f"Failed to send TUI prompt to Telegram: {e}")
 
 
 async def _permission_dispatcher(
@@ -700,10 +744,36 @@ def main():
 
         application.add_handler(CallbackQueryHandler(on_permission_callback, pattern="^perm:"))
 
-        # Start permission dispatcher as a background asyncio task
+        # TUI choice prompt inline keyboard handler
+        async def on_tui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            query = update.callback_query
+            auth_ok = not AUTHORIZED_USER_ID or str(query.from_user.id) == AUTHORIZED_USER_ID
+            if auth_ok:
+                choice = query.data.split(":", 1)[1]  # "tui:2" → "2"
+                log.info(f"TUI choice {choice!r} via Telegram button")
+                try:
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    sock.connect(config.USER_INPUT_SOCK)
+                    sock.sendall((json.dumps({"type": "tui_response", "choice": choice}) + "\n").encode())
+                    sock.close()
+                except Exception as e:
+                    log.error(f"Failed to send tui_response: {e}")
+            try:
+                await query.answer()
+                label = f"✓ {query.data.split(':')[1]} selected"
+                await query.edit_message_text(label)
+            except Exception:
+                pass
+
+        application.add_handler(CallbackQueryHandler(on_tui_callback, pattern="^tui:"))
+
+        # Start permission + TUI dispatchers as background asyncio tasks
         if AUTHORIZED_USER_ID:
             loop.create_task(
                 _permission_dispatcher(subscriber, application.bot, AUTHORIZED_USER_ID)
+            )
+            loop.create_task(
+                _tui_dispatcher(subscriber, application.bot, AUTHORIZED_USER_ID)
             )
 
         log.info(f"TelegramNode starting (authorized user: {AUTHORIZED_USER_ID or 'ANY'})")

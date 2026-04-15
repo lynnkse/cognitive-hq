@@ -33,11 +33,13 @@ import struct
 import socket
 import threading
 import queue
+import re
 import signal as signal_module
 import json
 import logging
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -80,6 +82,10 @@ class SessionManagerNode:
         # Keyboard bytes buffered while GENERATING
         self.keyboard_buffer: list[bytes] = []
         self.state_lock = threading.Lock()
+
+        # Ring buffer of recent PTY output for TUI prompt detection (~4KB)
+        self._pty_output_buf: deque = deque(maxlen=4096)
+        self._last_tui_prompt_hash: Optional[int] = None
 
         self.master_fd: Optional[int] = None
         self.claude_proc: Optional[subprocess.Popen] = None
@@ -273,6 +279,9 @@ class SessionManagerNode:
         log.warning("PTY reader exiting")
         self._handle_claude_exit()
 
+    # ANSI escape code pattern for stripping
+    _ANSI_RE = re.compile(rb'\x1b(?:\[[0-9;]*[a-zA-Z]|\][^\x07]*\x07|[^[a-zA-Z])')
+
     def _forward_display(self, data: bytes):
         with self.display_lock:
             if self.display_client:
@@ -280,6 +289,78 @@ class SessionManagerNode:
                     self.display_client.sendall(data)
                 except Exception:
                     self.display_client = None
+
+        # Feed into PTY output buffer for TUI prompt detection
+        for b in data:
+            self._pty_output_buf.append(b)
+        self._detect_tui_prompt()
+
+    def _detect_tui_prompt(self):
+        """
+        Scan recent PTY output for Claude TUI choice prompts like:
+          1. Yes
+          2. Yes, allow...
+          3. No
+        When detected, publish a tui_prompt event to response subscribers
+        so TelegramNode can show inline buttons.
+        """
+        raw = bytes(self._pty_output_buf)
+        clean = self._ANSI_RE.sub(b'', raw)
+        text = clean.decode('utf-8', errors='replace')
+
+        # Look for 2+ consecutive numbered choices
+        lines = text.splitlines()
+        choices = []
+        for line in lines[-20:]:  # only scan last 20 lines
+            stripped = line.strip()
+            m = re.match(r'^(\d+)\.\s+(.+)', stripped)
+            if m:
+                choices.append((int(m.group(1)), m.group(2).strip()))
+            elif choices:
+                # Non-choice line after choices started — stop collecting
+                break
+
+        if len(choices) < 2:
+            return
+
+        # Find the question (last non-choice, non-empty line before choices)
+        choice_nums = {c[0] for c in choices}
+        question = ""
+        for line in reversed(lines[-30:]):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if re.match(r'^\d+\.', stripped):
+                continue
+            if "Esc to cancel" in stripped or "Tab to amend" in stripped:
+                continue
+            question = stripped
+            break
+
+        prompt_hash = hash(tuple(choices))
+        if prompt_hash == self._last_tui_prompt_hash:
+            return
+        self._last_tui_prompt_hash = prompt_hash
+
+        log.info(f"TUI prompt detected: {question!r} choices={choices}")
+        self._publish_tui_prompt(question, choices)
+
+    def _publish_tui_prompt(self, question: str, choices: list):
+        payload = json.dumps({
+            "type": "tui_prompt",
+            "question": question,
+            "choices": [{"num": n, "text": t} for n, t in choices],
+        }) + "\n"
+        payload_bytes = payload.encode()
+        with self.response_subs_lock:
+            dead = []
+            for conn in self.response_subscribers:
+                try:
+                    conn.sendall(payload_bytes)
+                except Exception:
+                    dead.append(conn)
+            for conn in dead:
+                self.response_subscribers.remove(conn)
 
     # ------------------------------------------------------------------
     # JSONL response detection
@@ -627,6 +708,16 @@ class SessionManagerNode:
                                 msg.get("decision", "deny"),
                                 msg.get("message", ""),
                             )
+                        elif msg.get("type") == "tui_response":
+                            # User selected a numbered choice from Telegram
+                            choice = str(msg.get("choice", "")).strip()
+                            if choice:
+                                log.info(f"tui_response: sending {choice!r} to PTY")
+                                self._last_tui_prompt_hash = None  # reset so re-detection works
+                                try:
+                                    os.write(self.master_fd, (choice + "\r").encode())
+                                except OSError as e:
+                                    log.error(f"Failed to write tui_response to PTY: {e}")
                         else:
                             self.input_queue.put(QueueItem(
                                 text=msg["text"],
@@ -699,17 +790,9 @@ class SessionManagerNode:
         log.info("CLINode keyboard disconnected")
 
     def _route_keyboard_bytes(self, data: bytes):
-        with self.state_lock:
-            generating = self.state == "GENERATING"
-
-        with self._permission_lock:
-            permission_pending = self._permission_conn is not None
-
-        if generating and not permission_pending:
-            with self.state_lock:
-                self.keyboard_buffer.append(data)
-        else:
-            self._write_to_pty(data)
+        # Always forward CLI keystrokes to PTY — buffering caused CLI to be
+        # stuck when Claude showed a TUI prompt (e.g. "1. Yes / 2. No").
+        self._write_to_pty(data)
 
     def _display_server_thread(self):
         sock_path = config.DISPLAY_SOCK
