@@ -508,8 +508,16 @@ class SessionManagerNode:
 
             # Inject message via PTY.
             # Claude's TUI runs in raw terminal mode: Enter = \r (not \n).
+            # Write in chunks to avoid PTY buffer limits (~4096 bytes) that
+            # cause long messages (e.g. transcribed voice notes) to lose the
+            # trailing \r, leaving the message sitting unsubmitted in the TUI.
             try:
-                os.write(self.master_fd, (item.text + "\r").encode())
+                encoded = item.text.encode()
+                chunk_size = 512
+                for i in range(0, len(encoded), chunk_size):
+                    os.write(self.master_fd, encoded[i:i + chunk_size])
+                    time.sleep(0.02)
+                os.write(self.master_fd, b"\r")
             except OSError:
                 log.error("Failed to write message to PTY")
                 with self.state_lock:

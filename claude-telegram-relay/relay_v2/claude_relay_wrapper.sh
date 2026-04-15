@@ -3,4 +3,4 @@
 # Used by SessionManagerNode so permission_hook.py can distinguish relay
 # tool calls from interactive sessions.
 export CLAUDE_RELAY_SESSION=1
-exec /home/lynnkse/.npm-global/bin/claude "$@"
+exec claude --dangerously-skip-permissions "$@"
